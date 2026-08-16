@@ -1,6 +1,7 @@
 import yaml from 'js-yaml';
 import { parseDocumentationHtml } from './parser.js';
 import { htmlToMarkdown } from './markdown-converter.js';
+import { buildOKFBundleFromOpenApi } from './openapi-parser.js';
 
 /**
  * Creates a URL-safe slug from a string.
@@ -43,6 +44,8 @@ export function getConceptPathInfo(pageData, isRoot = false) {
   if (isRoot) {
     folder = '';
     slug = 'overview';
+  } else if (lowerSec && lowerSec !== 'general' && lowerSec !== 'overview') {
+    folder = slugify(lowerSec);
   } else if (lowerSec.includes('migrate') || lowerSlug.includes('migrat')) {
     folder = 'migrate-data';
   } else if (lowerSec.includes('load') || lowerSlug.includes('load') || lowerSlug.includes('transfer') || lowerSlug.includes('storage')) {
@@ -53,8 +56,6 @@ export function getConceptPathInfo(pageData, isRoot = false) {
     folder = 'export-data';
   } else if (lowerSec.includes('reference') || lowerSec.includes('api') || lowerSec.includes('schema')) {
     folder = 'reference';
-  } else if (lowerSec && lowerSec !== 'general') {
-    folder = slugify(lowerSec);
   } else {
     folder = 'guides';
   }
@@ -270,12 +271,29 @@ export class OKFBundleBuilder {
       bundleFiles.set(`${folder}/index.md`, indexContent);
     });
 
+    // Step 3b: Merge any OpenAPI specifications found in multi-URL crawl
+    if (crawlResult.openApiSpecs && crawlResult.openApiSpecs.length > 0) {
+      for (const apiInfo of crawlResult.openApiSpecs) {
+        const apiBundle = buildOKFBundleFromOpenApi(apiInfo.parsedApi, apiInfo.specUrl, {
+          actor: this.actor,
+          timestamp: this.timestamp
+        });
+        for (const [relPath, content] of apiBundle.files.entries()) {
+          if (relPath !== 'index.md' && relPath !== 'log.md') {
+            bundleFiles.set(relPath, content);
+            const folder = relPath.includes('/') ? relPath.split('/')[0] : '';
+            if (folder) folders.add(folder);
+          }
+        }
+      }
+    }
+
     // Step 4: Generate Bundle Root index.md (with okf_version: "0.2")
     const rootIndexContent = this.generateRootIndex(folderConceptsMap, folders, computations, parsedPages[0]?.parsed);
     bundleFiles.set('index.md', rootIndexContent);
 
     // Step 5: Generate log.md
-    const logContent = this.generateLogFile(parsedPages.length, folders.size, startUrl);
+    const logContent = this.generateLogFile(bundleFiles.size, folders.size, startUrl);
     bundleFiles.set('log.md', logContent);
 
     const rootParsed = parsedPages[0]?.parsed;

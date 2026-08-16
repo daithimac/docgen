@@ -120,40 +120,60 @@ export async function downloadZipInBrowser(files, bundleName = 'okf-knowledge-bu
  * Client-side bundle generator for OpenAPI specs or custom input
  */
 export async function generateBundleInBrowser(rawContentOrUrl, isUrl = true) {
-  let spec = null;
+  let specs = [];
   let sourceUrl = isUrl ? rawContentOrUrl : 'https://api.example.com/spec.json';
 
   if (isUrl) {
-    let fetchUrl = rawContentOrUrl;
-    if (rawContentOrUrl.includes('api.oireachtas.ie') && !rawContentOrUrl.endsWith('.json')) {
-      fetchUrl = 'https://api.oireachtas.ie/swagger.json';
-    }
+    const urls = rawContentOrUrl.split(/[\n,]+/).map(s => s.trim()).filter(Boolean);
 
-    try {
-      const resp = await fetch(fetchUrl);
-      spec = await resp.json();
-    } catch (e) {
-      // Try CORS proxy if direct fetch fails on GitHub pages
+    for (const u of urls) {
+      let fetchUrl = u;
+      if (u.includes('api.oireachtas.ie') && !u.endsWith('.json')) {
+        fetchUrl = 'https://api.oireachtas.ie/swagger.json';
+      }
+
+      let fetchedSpec = null;
       try {
-        const corsUrl = `https://corsproxy.io/?${encodeURIComponent(fetchUrl)}`;
-        const resp = await fetch(corsUrl);
-        spec = await resp.json();
-      } catch (err2) {
-        throw new Error(`Failed to fetch API specification: ${e.message}. You can also paste the JSON/YAML directly.`);
+        const resp = await fetch(fetchUrl);
+        fetchedSpec = await resp.json();
+      } catch (e) {
+        // Try CORS proxy if direct fetch fails on GitHub pages
+        try {
+          const corsUrl = `https://corsproxy.io/?${encodeURIComponent(fetchUrl)}`;
+          const resp = await fetch(corsUrl);
+          fetchedSpec = await resp.json();
+        } catch (err2) {}
+      }
+
+      if (fetchedSpec) {
+        specs.push({ spec: fetchedSpec, url: u });
       }
     }
   } else {
     // Parse raw text JSON or YAML
     try {
-      spec = typeof rawContentOrUrl === 'string' ? (rawContentOrUrl.trim().startsWith('{') ? JSON.parse(rawContentOrUrl) : yaml.load(rawContentOrUrl)) : rawContentOrUrl;
+      const parsed = typeof rawContentOrUrl === 'string' ? (rawContentOrUrl.trim().startsWith('{') ? JSON.parse(rawContentOrUrl) : yaml.load(rawContentOrUrl)) : rawContentOrUrl;
+      specs.push({ spec: parsed, url: sourceUrl });
     } catch (err) {
       throw new Error(`Failed to parse OpenAPI JSON/YAML: ${err.message}`);
     }
   }
 
-  if (spec && (spec.swagger || spec.openapi)) {
-    const parsedApi = parseOpenApiSpec(spec, sourceUrl);
-    const bundle = buildOKFBundleFromOpenApi(parsedApi, sourceUrl);
+  if (specs.length > 0) {
+    // Combine specs into bundle
+    let mainParsedApi = null;
+    for (const { spec, url } of specs) {
+      if (spec && (spec.swagger || spec.openapi)) {
+        mainParsedApi = parseOpenApiSpec(spec, url);
+        break;
+      }
+    }
+
+    if (!mainParsedApi) {
+      throw new Error('Could not parse OpenAPI specification from provided URL(s).');
+    }
+
+    const bundle = buildOKFBundleFromOpenApi(mainParsedApi, sourceUrl);
 
     const filesObject = {};
     for (const [filePath, content] of bundle.files.entries()) {

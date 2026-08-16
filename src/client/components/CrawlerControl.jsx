@@ -3,6 +3,11 @@ import { Globe, ArrowRight, Settings2, Sparkles, Layers, Sliders, Play, RefreshC
 
 const PRESETS = [
   {
+    name: 'Multi-Site: BigQuery ELT + Dataform',
+    url: 'https://docs.cloud.google.com/bigquery/docs/load-transform-export-intro, https://docs.cloud.google.com/dataform/docs/overview',
+    description: 'Combined BigQuery Data Integration & Dataform pipelines'
+  },
+  {
     name: 'Oireachtas Open Data APIs',
     url: 'https://api.oireachtas.ie/',
     description: 'Houses of the Oireachtas Open Data REST APIs & Swagger Specification'
@@ -32,7 +37,7 @@ export default function CrawlerControl({
   setCurrentUrl
 }) {
   const [showAdvanced, setShowAdvanced] = useState(false);
-  const [maxPages, setMaxPages] = useState(20);
+  const [maxPages, setMaxPages] = useState(25);
   const [maxDepth, setMaxDepth] = useState(3);
   const [scope, setScope] = useState('subtree');
   const [extractComputations, setExtractComputations] = useState(true);
@@ -80,9 +85,9 @@ export default function CrawlerControl({
         <div className="url-input-wrapper">
           <Globe className="url-input-icon" size={18} />
           <input
-            type="url"
+            type="text"
             className="url-input"
-            placeholder="Enter documentation starting URL (e.g. https://docs.cloud.google.com/bigquery/docs/load-transform-export-intro)..."
+            placeholder="Enter one or more documentation / API URLs separated by commas (e.g. https://site1.com/docs, https://site2.com/docs)..."
             value={currentUrl}
             onChange={(e) => setCurrentUrl(e.target.value)}
             required

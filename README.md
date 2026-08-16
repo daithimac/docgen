@@ -57,11 +57,14 @@ Open **http://localhost:3000** in your browser.
 
 ## Using the CLI
 
-Run the `docgen` CLI command to crawl a documentation website and write the OKF bundle to disk:
-
+### Multi-URL & Multi-API Documentation Ingestion
+You can pass multiple documentation URLs, API endpoints, or Swagger/OpenAPI specifications separated by commas or newlines:
 ```bash
-# Basic usage
-node bin/docgen.js --url https://docs.cloud.google.com/bigquery/docs/load-transform-export-intro --out ./bundles/bigquery-elt
+node bin/docgen.js --url "https://docs.cloud.google.com/bigquery/docs/load-transform-export-intro, https://docs.cloud.google.com/dataform/docs/overview" --out ./bundles/cloud-data-suite
+```
+* **Unified Knowledge Corpus**: Crawls all specified sites and aggregates them into structured section directories.
+* **Unified Progressive Disclosure Index**: Assembles a single top-level `index.md` and cross-references all ingested documents.
+* **Mixed Sources Supported**: Mix HTML documentation trees with OpenAPI/Swagger REST APIs in a single bundle.
 
 # With options
 node bin/docgen.js \

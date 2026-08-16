@@ -28,17 +28,13 @@ export function normalizeUrl(urlStr, baseUrl = null) {
 }
 
 /**
- * Checks whether a candidate link is within the target scope of the crawl.
+ * Checks whether a candidate link is within the target scope of any seed URL.
  */
-export function isRelevantLink(candidateUrl, rootUrl, scope = 'subtree') {
+export function isRelevantLink(candidateUrl, seedUrls, scope = 'subtree') {
+  const seeds = Array.isArray(seedUrls) ? seedUrls : [seedUrls];
+
   try {
     const candidate = new URL(candidateUrl);
-    const root = new URL(rootUrl);
-
-    // Must match hostname / domain
-    if (candidate.origin !== root.origin) {
-      return false;
-    }
 
     // Ignore asset extensions
     const pathname = candidate.pathname.toLowerCase();
@@ -47,30 +43,41 @@ export function isRelevantLink(candidateUrl, rootUrl, scope = 'subtree') {
       return false;
     }
 
-    // Determine documentation base prefix
-    // For e.g. https://docs.cloud.google.com/bigquery/docs/load-transform-export-intro
-    // the doc root could be /bigquery/docs/
-    if (scope === 'domain') {
-      return true;
-    }
+    for (const rootUrl of seeds) {
+      if (!rootUrl) continue;
+      const root = new URL(rootUrl);
 
-    // If scope is 'section' or 'subtree', check path prefix or related section roots
-    const rootPathParts = root.pathname.split('/').filter(Boolean);
-    const candidateParts = candidate.pathname.split('/').filter(Boolean);
+      // Must match hostname / domain
+      if (candidate.origin !== root.origin) {
+        continue;
+      }
 
-    // If at least the first 2 parts match (e.g. ['bigquery', 'docs'])
-    if (rootPathParts.length >= 2 && candidateParts.length >= 2) {
-      if (rootPathParts[0] === candidateParts[0] && rootPathParts[1] === candidateParts[1]) {
+      if (scope === 'domain') {
+        return true;
+      }
+
+      // If scope is 'section' or 'subtree', check path prefix or related section roots
+      const rootPathParts = root.pathname.split('/').filter(Boolean);
+      const candidateParts = candidate.pathname.split('/').filter(Boolean);
+
+      // If at least the first 2 parts match (e.g. ['bigquery', 'docs'])
+      if (rootPathParts.length >= 2 && candidateParts.length >= 2) {
+        if (rootPathParts[0] === candidateParts[0] && rootPathParts[1] === candidateParts[1]) {
+          return true;
+        }
+      }
+
+      // Common documentation roots (e.g. /docs/, /guide/, etc.)
+      if (rootPathParts.length > 0 && rootPathParts[0] === candidateParts[0]) {
+        return true;
+      }
+
+      if (candidate.pathname.startsWith(root.pathname)) {
         return true;
       }
     }
 
-    // Common documentation roots (e.g. /docs/, /guide/, etc.)
-    if (rootPathParts.length > 0 && rootPathParts[0] === candidateParts[0]) {
-      return true;
-    }
-
-    return candidate.pathname.startsWith(root.pathname);
+    return false;
   } catch (e) {
     return false;
   }
@@ -80,7 +87,7 @@ export function isRelevantLink(candidateUrl, rootUrl, scope = 'subtree') {
  * Discovers links from a page, prioritizing article body links and the active
  * documentation section (e.g. Migrate Data, Load Data, Transform Data, Export Data).
  */
-export function extractLinksFromHtml(html, currentUrl, rootUrl, options = {}) {
+export function extractLinksFromHtml(html, currentUrl, seedUrls, options = {}) {
   const $ = cheerio.load(html);
   const discovered = [];
   const seen = new Set();
@@ -90,7 +97,7 @@ export function extractLinksFromHtml(html, currentUrl, rootUrl, options = {}) {
     const normalized = normalizeUrl(href, currentUrl);
     if (!normalized || seen.has(normalized)) return;
 
-    if (isRelevantLink(normalized, rootUrl, options.scope || 'subtree')) {
+    if (isRelevantLink(normalized, seedUrls, options.scope || 'subtree')) {
       seen.add(normalized);
       discovered.push({
         url: normalized,
@@ -111,15 +118,12 @@ export function extractLinksFromHtml(html, currentUrl, rootUrl, options = {}) {
   });
 
   // 2. HIGH PRIORITY: Active Section Navigation in Devsite / Sidebar
-  // Find the active heading or the section container containing the current URL or "Load, transform, and export"
   const currentPathname = new URL(currentUrl).pathname;
-  let activeSectionContainer = null;
 
-  // Search for the section container that contains current page or related sub-sections
   $('.devsite-nav-section, .devsite-expandable-nav, .menu__list-item, .nav-group').each((_, sectionElem) => {
     const sectionText = $(sectionElem).text();
     const hasCurrentLink = $(sectionElem).find(`a[href*="${currentPathname}"]`).length > 0;
-    const isTargetSection = /migrate|load|transform|export/i.test(sectionText);
+    const isTargetSection = /migrate|load|transform|export|api|quickstart/i.test(sectionText);
 
     if (hasCurrentLink || isTargetSection) {
       let sectionTitle = '';
@@ -246,47 +250,86 @@ export class DocumentationCrawler {
     return null;
   }
 
-  async crawl(startUrl) {
-    const normalizedStartUrl = normalizeUrl(startUrl);
-    if (!normalizedStartUrl) {
-      throw new Error(`Invalid starting URL: ${startUrl}`);
+  async crawl(startInput) {
+    let rawUrls = [];
+    if (Array.isArray(startInput)) {
+      rawUrls = startInput;
+    } else if (typeof startInput === 'string') {
+      rawUrls = startInput.split(/[\n,]+/).map(s => s.trim()).filter(Boolean);
     }
 
-    const queue = [{ url: normalizedStartUrl, depth: 0, parentUrl: null, section: 'Overview' }];
+    const seedUrls = rawUrls
+      .map(u => normalizeUrl(u))
+      .filter(Boolean);
+
+    if (seedUrls.length === 0) {
+      throw new Error(`No valid starting URLs provided: ${startInput}`);
+    }
+
+    const queue = [];
     const visited = new Set();
     const crawledPages = [];
     const discoveredLinkGraph = new Map();
+    const openApiSpecs = [];
 
     this.onProgress({
       type: 'start',
-      startUrl: normalizedStartUrl,
+      startUrl: seedUrls.join(', '),
+      seedCount: seedUrls.length,
       maxPages: this.maxPages,
       maxDepth: this.maxDepth
     });
 
-    // Check initial page for OpenAPI / Swagger
-    try {
-      const initialHtml = await this.fetchPage(normalizedStartUrl);
-      const openApiSpecInfo = await this.detectOpenApiSpec(initialHtml, normalizedStartUrl);
+    // Check each seed URL for OpenAPI / Swagger first
+    for (const seedUrl of seedUrls) {
+      try {
+        const initialHtml = await this.fetchPage(seedUrl);
+        const openApiSpecInfo = await this.detectOpenApiSpec(initialHtml, seedUrl);
 
-      if (openApiSpecInfo) {
-        this.onProgress({
-          type: 'openapi_detected',
-          specUrl: openApiSpecInfo.specUrl,
-          title: openApiSpecInfo.spec.info?.title || 'OpenAPI Specification'
+        if (openApiSpecInfo) {
+          this.onProgress({
+            type: 'openapi_detected',
+            specUrl: openApiSpecInfo.specUrl,
+            title: openApiSpecInfo.spec.info?.title || 'OpenAPI Specification'
+          });
+
+          const parsedApi = parseOpenApiSpec(openApiSpecInfo.spec, openApiSpecInfo.specUrl);
+          openApiSpecs.push({
+            spec: openApiSpecInfo.spec,
+            parsedApi,
+            specUrl: openApiSpecInfo.specUrl
+          });
+        } else {
+          queue.push({
+            url: seedUrl,
+            depth: 0,
+            parentUrl: null,
+            section: 'Overview'
+          });
+        }
+      } catch (e) {
+        queue.push({
+          url: seedUrl,
+          depth: 0,
+          parentUrl: null,
+          section: 'Overview'
         });
-
-        const parsedApi = parseOpenApiSpec(openApiSpecInfo.spec, openApiSpecInfo.specUrl);
-        return {
-          isOpenApi: true,
-          openApiData: parsedApi,
-          specUrl: openApiSpecInfo.specUrl,
-          startUrl: normalizedStartUrl,
-          pages: [],
-          linkGraph: new Map()
-        };
       }
-    } catch (e) {}
+    }
+
+    // If ONLY OpenAPI specs were provided (e.g. single swagger URL)
+    if (queue.length === 0 && openApiSpecs.length > 0) {
+      return {
+        isOpenApi: true,
+        openApiData: openApiSpecs[0].parsedApi,
+        openApiSpecs,
+        specUrl: openApiSpecs[0].specUrl,
+        startUrl: seedUrls.join(', '),
+        seedUrls,
+        pages: [],
+        linkGraph: new Map()
+      };
+    }
 
     while (queue.length > 0 && crawledPages.length < this.maxPages) {
       const current = queue.shift();
@@ -305,7 +348,7 @@ export class DocumentationCrawler {
 
       try {
         const html = await this.fetchPage(current.url);
-        const extractedLinks = extractLinksFromHtml(html, current.url, normalizedStartUrl, { scope: this.scope });
+        const extractedLinks = extractLinksFromHtml(html, current.url, seedUrls, { scope: this.scope });
         discoveredLinkGraph.set(current.url, extractedLinks);
 
         crawledPages.push({
@@ -362,12 +405,14 @@ export class DocumentationCrawler {
     this.onProgress({
       type: 'complete',
       totalCrawled: crawledPages.length,
-      startUrl: normalizedStartUrl
+      startUrl: seedUrls.join(', ')
     });
 
     return {
-      startUrl: normalizedStartUrl,
+      startUrl: seedUrls.join(', '),
+      seedUrls,
       pages: crawledPages,
+      openApiSpecs,
       linkGraph: discoveredLinkGraph
     };
   }

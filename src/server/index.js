@@ -51,6 +51,7 @@ app.get('/api/crawl/stream', (req, res) => {
 app.post('/api/crawl', async (req, res) => {
   const {
     url,
+    urls,
     maxPages = 20,
     maxDepth = 3,
     scope = 'subtree',
@@ -58,8 +59,9 @@ app.post('/api/crawl', async (req, res) => {
     sessionId
   } = req.body;
 
-  if (!url) {
-    return res.status(400).json({ error: 'URL is required' });
+  const targetUrls = urls || url;
+  if (!targetUrls) {
+    return res.status(400).json({ error: 'URL(s) are required' });
   }
 
   const streamSender = sessionId ? activeCrawlEvents.get(sessionId) : null;
@@ -70,7 +72,8 @@ app.post('/api/crawl', async (req, res) => {
   };
 
   try {
-    emitProgress({ type: 'init', message: `Initializing crawler for ${url}` });
+    const urlDisplay = Array.isArray(targetUrls) ? targetUrls.join(', ') : targetUrls;
+    emitProgress({ type: 'init', message: `Initializing crawler for ${urlDisplay}` });
 
     const crawler = new DocumentationCrawler({
       maxPages: parseInt(maxPages, 10),
@@ -84,7 +87,7 @@ app.post('/api/crawl', async (req, res) => {
       }
     });
 
-    const crawlResult = await crawler.crawl(url);
+    const crawlResult = await crawler.crawl(targetUrls);
 
     emitProgress({ type: 'building_bundle', message: 'Generating OKF v0.2 bundle structure...' });
 

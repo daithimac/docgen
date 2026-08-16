@@ -14,21 +14,25 @@ program
   .name('docgen')
   .description('Crawl documentation and generate Open Knowledge Format (OKF v0.2) bundles')
   .version('0.2.0')
-  .requiredOption('-u, --url <url>', 'Base documentation URL to crawl (e.g. https://docs.cloud.google.com/bigquery/docs/load-transform-export-intro)')
+  .requiredOption('-u, --url <urls...>', 'Base documentation or API URL(s) to crawl (comma or space separated)')
   .option('-o, --out <directory>', 'Output directory for generated OKF bundle', './okf-bundle')
   .option('-p, --max-pages <number>', 'Maximum pages to crawl', '25')
   .option('-d, --max-depth <number>', 'Maximum crawl depth', '3')
   .option('-s, --scope <scope>', 'Crawl scope: subtree | domain', 'subtree')
   .option('--no-computations', 'Disable extraction of Attested Computations')
   .action(async (options) => {
+    // Flatten array of URLs and comma-separated tokens
+    const rawUrls = Array.isArray(options.url) ? options.url.join(',') : options.url;
+    const targetUrls = rawUrls.split(/[\n,]+/).map(s => s.trim()).filter(Boolean);
+
     console.log('\n======================================================');
     console.log('   OKF Documentation Bundle Generator (v0.2)');
     console.log('======================================================\n');
-    console.log(`Target URL:   ${options.url}`);
-    console.log(`Output Dir:   ${path.resolve(options.out)}`);
-    console.log(`Max Pages:    ${options.maxPages}`);
-    console.log(`Max Depth:    ${options.maxDepth}`);
-    console.log(`Scope:        ${options.scope}\n`);
+    console.log(`Target URL(s): ${targetUrls.join('\n               ')}`);
+    console.log(`Output Dir:    ${path.resolve(options.out)}`);
+    console.log(`Max Pages:     ${options.maxPages}`);
+    console.log(`Max Depth:     ${options.maxDepth}`);
+    console.log(`Scope:         ${options.scope}\n`);
 
     try {
       // 1. Crawler
@@ -46,7 +50,7 @@ program
         }
       });
 
-      const crawlResult = await crawler.crawl(options.url);
+      const crawlResult = await crawler.crawl(targetUrls);
       console.log(`\n✅ Crawl complete: ${crawlResult.pages.length} pages collected.`);
 
       // 2. Build OKF Bundle
