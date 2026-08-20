@@ -127,7 +127,19 @@ export function describeSources(inputs) {
  * mixed batch still produces a bundle.
  */
 export async function ingestSources(inputs, ctx = {}) {
-  const { onProgress = () => {} } = ctx;
+  const userOnProgress = ctx.onProgress || (() => {});
+  const warnings = [];
+
+  // Warnings must survive past the progress stream - a capped or truncated run
+  // has to be visible in the result, not only in a log line that scrolled by.
+  const onProgress = (event) => {
+    if (event && event.type === 'warning' && event.message) {
+      warnings.push(event.message);
+    }
+    userOnProgress(event);
+  };
+  ctx = { ...ctx, onProgress };
+
   const descriptors = normalizeSourceInputs(inputs);
 
   if (descriptors.length === 0) {
@@ -199,5 +211,5 @@ export async function ingestSources(inputs, ctx = {}) {
     throw new Error(detail || 'No documents could be extracted from the supplied sources.');
   }
 
-  return { documents, sources, errors };
+  return { documents, sources, errors, warnings };
 }

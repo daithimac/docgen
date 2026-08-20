@@ -4,6 +4,10 @@ import { parseSpecText } from './openapi.js';
 import { SOURCE_TYPES, UnsupportedInRuntimeError } from './types.js';
 
 const DEFAULT_MAX_FILES = 100;
+const DEFAULT_READ_CONCURRENCY = 8;
+// Above this many documentation files, per-file HTTP stops being sensible and a
+// single shallow clone is dramatically faster.
+const CLONE_PREFERRED_ABOVE = 250;
 const MARKDOWN_RE = /\.mdx?$/i;
 const SPEC_RE = /(^|\/)(openapi|swagger)[^/]*\.(json|ya?ml)$/i;
 
@@ -228,6 +232,17 @@ export async function listRepoFilesViaClone(repo, ctx) {
     throw new Error(`git clone failed for ${repo.cloneUrl}: ${(err.stderr || err.message || '').toString().trim()}`);
   }
 
+  // Resolve the branch the clone actually landed on, so provenance URLs name a
+  // real ref instead of "HEAD" and match what the API path produces.
+  let ref = repo.ref;
+  if (!ref) {
+    try {
+      const { stdout } = await run('git', ['-C', tmpDir, 'rev-parse', '--abbrev-ref', 'HEAD'], { timeout: 15000 });
+      ref = String(stdout || '').trim();
+    } catch (e) { /* fall back below */ }
+  }
+  if (!ref || ref === 'HEAD') ref = 'HEAD';
+
   const paths = [];
   const walk = async (dir, prefix = '') => {
     for (const entry of await fs.readdir(dir, { withFileTypes: true })) {
@@ -243,12 +258,34 @@ export async function listRepoFilesViaClone(repo, ctx) {
   await walk(tmpDir);
 
   return {
-    ref: repo.ref || 'HEAD',
+    ref,
+    viaClone: true,
     paths,
     readFile: (rel) => fs.readFile(path.join(tmpDir, rel), 'utf8'),
     cleanup: () => fs.rm(tmpDir, { recursive: true, force: true }).catch(() => {}),
     truncated: false
   };
+}
+
+/**
+ * Maps over items with bounded concurrency, preserving input order.
+ * Reading thousands of files one at a time is the single slowest thing DocGen
+ * does against a large repository.
+ */
+async function mapWithConcurrency(items, limit, worker) {
+  const results = new Array(items.length);
+  let next = 0;
+
+  const runners = Array.from({ length: Math.min(limit, items.length) }, async () => {
+    while (true) {
+      const index = next++;
+      if (index >= items.length) return;
+      results[index] = await worker(items[index], index);
+    }
+  });
+
+  await Promise.all(runners);
+  return results;
 }
 
 /**
@@ -258,14 +295,46 @@ export async function ingest(input, ctx = {}) {
   const { fetcher, onProgress = () => {}, options = {} } = ctx;
   const repo = parseRepoUrl(input.value);
   const sourceId = input.sourceId || slugify(repo.fullName);
-  const maxFiles = parseInt(options.maxFiles, 10) || DEFAULT_MAX_FILES;
+  // maxFiles of 0 means "no ceiling".
+  const rawMaxFiles = options.maxFiles === 0 || options.maxFiles === '0'
+    ? 0
+    : (parseInt(options.maxFiles, 10) || DEFAULT_MAX_FILES);
+  const maxFiles = rawMaxFiles === 0 ? Infinity : rawMaxFiles;
+  const concurrency = parseInt(options.readConcurrency, 10) || DEFAULT_READ_CONCURRENCY;
+  const canClone = Boolean(fetcher?.capabilities?.canClone);
 
   onProgress({ type: 'repo_start', url: repo.webUrl, message: `Reading repository ${repo.fullName}` });
 
   let listing = null;
-  if (repo.host === 'github' || repo.host === 'gitlab') {
+  const isHostedApi = repo.host === 'github' || repo.host === 'gitlab';
+
+  if (options.fetchMode === 'clone' && canClone) {
+    listing = await listRepoFilesViaClone(repo, ctx);
+  } else if (isHostedApi) {
     listing = await listRepoFilesViaApi(repo, ctx);
-  } else if (fetcher?.capabilities?.canClone) {
+
+    // The tree API stops enumerating very large repositories, and per-file HTTP
+    // is the wrong tool past a few hundred documents. A single shallow clone
+    // solves both, so switch to it when either applies.
+    const docCount = listing.paths.filter(isIngestibleRepoPath).length;
+    const tooLarge = docCount > CLONE_PREFERRED_ABOVE && maxFiles > CLONE_PREFERRED_ABOVE;
+
+    if ((listing.truncated || tooLarge) && canClone && options.fetchMode !== 'api') {
+      onProgress({
+        type: 'info',
+        message: listing.truncated
+          ? `${repo.fullName} is too large for the ${repo.host === 'gitlab' ? 'GitLab' : 'GitHub'} tree API to list completely - cloning instead.`
+          : `${repo.fullName} has ${docCount} documentation files - cloning is faster than fetching them individually.`
+      });
+      listing = await listRepoFilesViaClone(repo, ctx);
+    } else if (listing.truncated) {
+      onProgress({
+        type: 'warning',
+        message: `${repo.fullName} is too large for the ${repo.host === 'gitlab' ? 'GitLab' : 'GitHub'} tree API to list completely, and cloning is unavailable here. ` +
+          'This bundle covers only the part of the repository the API returned - run the source through the DocGen CLI or server for the complete repository.'
+      });
+    }
+  } else if (canClone) {
     listing = await listRepoFilesViaClone(repo, ctx);
   } else {
     throw new UnsupportedInRuntimeError(
@@ -283,30 +352,58 @@ export async function ingest(input, ctx = {}) {
     }
 
     candidates = prioritizeRepoPaths(candidates);
-    const truncatedByCap = candidates.length > maxFiles;
-    candidates = candidates.slice(0, maxFiles);
+    const totalCandidates = candidates.length;
+    const truncatedByCap = totalCandidates > maxFiles;
+    if (truncatedByCap) candidates = candidates.slice(0, maxFiles);
 
     if (candidates.length === 0) {
       throw new Error(`No markdown or API specification files found in ${repo.fullName}.`);
     }
-    if (truncatedByCap || listing.truncated) {
+    if (truncatedByCap) {
       onProgress({
         type: 'warning',
-        message: `${repo.fullName} contains more documentation files than the current limit (${maxFiles}); ingesting the highest-priority ${maxFiles}.`
+        message: `${repo.fullName} has ${totalCandidates} documentation files but the limit is ${maxFiles}; ` +
+          `ingesting the highest-priority ${maxFiles} and skipping ${totalCandidates - maxFiles}. ` +
+          'Raise --max-files, or set it to 0 for no limit.'
+      });
+    }
+
+    // Read files with bounded concurrency; sequential reads dominate the runtime
+    // on any repository with more than a handful of documents.
+    onProgress({
+      type: 'info',
+      message: `Reading ${candidates.length} documentation file(s) from ${repo.fullName}...`
+    });
+
+    const failedReads = [];
+    const contents = await mapWithConcurrency(candidates, concurrency, async (filePath) => {
+      try {
+        return { filePath, content: await listing.readFile(filePath) };
+      } catch (err) {
+        failedReads.push(filePath);
+        onProgress({ type: 'page_error', url: `${repo.webUrl}/${filePath}`, error: err.message });
+        return null;
+      }
+    });
+
+    // A file that could not be read is missing from the bundle. That must be a
+    // warning, not just a log line that scrolls past.
+    if (failedReads.length > 0) {
+      const sample = failedReads.slice(0, 3).join(', ');
+      onProgress({
+        type: 'warning',
+        message: `${failedReads.length} of ${candidates.length} file(s) in ${repo.fullName} could not be read and are missing from this bundle ` +
+          `(e.g. ${sample}${failedReads.length > 3 ? ', …' : ''}). ` +
+          (listing.viaClone ? 'Re-run to retry.' : 'Re-run with --fetch-mode clone, which reads files locally instead of over HTTP.')
       });
     }
 
     const documents = [];
     let processed = 0;
 
-    for (const filePath of candidates) {
-      let content;
-      try {
-        content = await listing.readFile(filePath);
-      } catch (err) {
-        onProgress({ type: 'page_error', url: `${repo.webUrl}/${filePath}`, error: err.message });
-        continue;
-      }
+    for (const entry of contents) {
+      if (!entry) continue;
+      const { filePath, content } = entry;
 
       processed++;
       const fileUrl = `${repo.webUrl}/blob/${listing.ref}/${filePath}`;

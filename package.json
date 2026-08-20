@@ -14,7 +14,7 @@
     "build": "vite build",
     "preview": "vite preview",
     "docgen": "node bin/docgen.js",
-    "test": "node test/test-okf.js && node test/test-openapi.js && node test/test-openapi-complex.js && node test/test-multi-url.js && node test/test-sources.js && node test/test-multi-source.js && node test/test-section-split.js"
+    "test": "node test/test-okf.js && node test/test-openapi.js && node test/test-openapi-complex.js && node test/test-multi-url.js && node test/test-sources.js && node test/test-multi-source.js && node test/test-section-split.js && node test/test-limits.js"
   },
   "dependencies": {
     "archiver": "^7.0.1",

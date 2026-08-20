@@ -52,7 +52,7 @@ export default function App() {
     setActiveFilePath('index.md');
   };
 
-  const handleStartCrawl = async ({ url, files = [], maxPages, maxDepth, scope, computations, maxFiles, githubToken, splitSections = true }) => {
+  const handleStartCrawl = async ({ url, files = [], maxPages, maxDepth, scope, computations, maxFiles, githubToken, splitSections = true, unlimited = false }) => {
     const urlList = (url || '')
       .split(/[\n,]+/)
       .map((s) => s.trim())
@@ -111,6 +111,7 @@ export default function App() {
       maxFiles,
       githubToken,
       splitSections,
+      unlimited,
       sessionId
     };
 
@@ -140,7 +141,10 @@ export default function App() {
         setProgressLogs((prev) => [
           ...prev,
           ...(bundleData.sourceErrors || []).map((e) => `⚠️ Skipped ${e.source}: ${e.error}`),
-          `🎉 Successfully generated ${bundleData.conceptCount} concepts in OKF v0.2 format!`
+          ...(bundleData.warnings || []).map((w) => `⚠️ INCOMPLETE: ${w}`),
+          (bundleData.warnings || []).length > 0
+            ? `⚠️ Generated ${bundleData.conceptCount} concepts, but this bundle is INCOMPLETE - see the warnings above.`
+            : `🎉 Successfully generated ${bundleData.conceptCount} concepts in OKF v0.2 format!`
         ]);
         return;
       }
@@ -160,6 +164,7 @@ export default function App() {
         maxFiles,
         githubToken,
         splitSections,
+        ...(unlimited ? { maxPages: 0, maxDepth: 0, maxFiles: 0, maxSections: 0 } : {}),
         onProgress: (data) => {
           if (data.message) {
             setProgressLogs((prev) => [...prev, data.message]);
@@ -174,7 +179,10 @@ export default function App() {
       setProgressLogs((prev) => [
         ...prev,
         ...(clientBundle.sourceErrors || []).map((e) => `⚠️ Skipped ${e.source}: ${e.error}`),
-        `🎉 Successfully generated ${clientBundle.conceptCount} concepts in OKF v0.2 format (In-Browser)!`
+        ...(clientBundle.warnings || []).map((w) => `⚠️ INCOMPLETE: ${w}`),
+        (clientBundle.warnings || []).length > 0
+          ? `⚠️ Generated ${clientBundle.conceptCount} concepts, but this bundle is INCOMPLETE - see the warnings above.`
+          : `🎉 Successfully generated ${clientBundle.conceptCount} concepts in OKF v0.2 format (In-Browser)!`
       ]);
     } catch (clientErr) {
       setProgressLogs((prev) => [...prev, `❌ Error: ${clientErr.message}`]);

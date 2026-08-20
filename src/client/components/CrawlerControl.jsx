@@ -55,6 +55,7 @@ export default function CrawlerControl({
   const [githubToken, setGithubToken] = useState('');
   const [extractComputations, setExtractComputations] = useState(true);
   const [splitSections, setSplitSections] = useState(true);
+  const [unlimited, setUnlimited] = useState(false);
   const [files, setFiles] = useState([]);
   const [isDragging, setIsDragging] = useState(false);
   const fileInputRef = useRef(null);
@@ -97,6 +98,7 @@ export default function CrawlerControl({
       scope,
       githubToken,
       splitSections,
+      unlimited,
       computations: extractComputations
     });
   };
@@ -251,7 +253,7 @@ export default function CrawlerControl({
           <div className="option-item">
             <label>
               <span>Max Pages per Web Source</span>
-              <strong>{maxPages}</strong>
+              <strong>{unlimited ? 'unlimited' : maxPages}</strong>
             </label>
             <input
               type="range"
@@ -260,14 +262,14 @@ export default function CrawlerControl({
               step="1"
               value={maxPages}
               onChange={(e) => setMaxPages(parseInt(e.target.value, 10))}
-              disabled={isCrawling}
+              disabled={isCrawling || unlimited}
             />
           </div>
 
           <div className="option-item">
             <label>
               <span>Max Link Depth</span>
-              <strong>{maxDepth}</strong>
+              <strong>{unlimited ? 'unlimited' : maxDepth}</strong>
             </label>
             <input
               type="range"
@@ -276,14 +278,14 @@ export default function CrawlerControl({
               step="1"
               value={maxDepth}
               onChange={(e) => setMaxDepth(parseInt(e.target.value, 10))}
-              disabled={isCrawling}
+              disabled={isCrawling || unlimited}
             />
           </div>
 
           <div className="option-item">
             <label>
               <span>Max Files per Repository</span>
-              <strong>{maxFiles}</strong>
+              <strong>{unlimited ? 'unlimited' : maxFiles}</strong>
             </label>
             <input
               type="range"
@@ -292,7 +294,7 @@ export default function CrawlerControl({
               step="10"
               value={maxFiles}
               onChange={(e) => setMaxFiles(parseInt(e.target.value, 10))}
-              disabled={isCrawling}
+              disabled={isCrawling || unlimited}
             />
           </div>
 
@@ -333,6 +335,21 @@ export default function CrawlerControl({
                 disabled={isCrawling}
               />
               <span>Extract Attested Computations (SQL/Code)</span>
+            </label>
+          </div>
+
+          <div className="option-item" style={{ justifyContent: 'center' }}>
+            <label
+              style={{ cursor: 'pointer', display: 'flex', alignItems: 'center', gap: '8px' }}
+              title="Ingest everything found, with no ceiling on pages, depth, files per repository or sections per document. Large repositories are cloned rather than fetched file by file."
+            >
+              <input
+                type="checkbox"
+                checked={unlimited}
+                onChange={(e) => setUnlimited(e.target.checked)}
+                disabled={isCrawling}
+              />
+              <span>Remove all ingestion limits</span>
             </label>
           </div>
 

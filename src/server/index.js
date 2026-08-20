@@ -105,6 +105,8 @@ async function runGeneration(req, res, files = []) {
     return res.status(400).json({ error: 'At least one source URL or uploaded file is required.' });
   }
 
+  const unlimited = body.unlimited === true || body.unlimited === 'true';
+
   try {
     const described = describeSources(inputs);
     emitProgress({
@@ -116,15 +118,18 @@ async function runGeneration(req, res, files = []) {
     const payload = await generateBundle(inputs, {
       fetcher: createNodeFetcher(),
       onProgress: emitProgress,
-      maxPages: body.maxPages ?? 20,
-      maxDepth: body.maxDepth ?? 3,
+      // 0 means unlimited for each cap; `unlimited` clears them all at once.
+      maxPages: unlimited ? 0 : (body.maxPages ?? 20),
+      maxDepth: unlimited ? 0 : (body.maxDepth ?? 3),
       scope: body.scope || 'subtree',
-      maxFiles: body.maxFiles ?? 100,
+      maxFiles: unlimited ? 0 : (body.maxFiles ?? 100),
+      readConcurrency: body.readConcurrency,
+      fetchMode: body.fetchMode,
       githubToken: body.githubToken || process.env.GITHUB_TOKEN || '',
       computations: body.computations !== false && body.computations !== 'false',
       splitSections: body.splitSections !== false && body.splitSections !== 'false',
       minSections: body.minSections,
-      maxSections: body.maxSections
+      maxSections: unlimited ? 0 : body.maxSections
     });
 
     res.json(payload);

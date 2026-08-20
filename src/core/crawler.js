@@ -175,8 +175,9 @@ export function extractLinksFromHtml(html, currentUrl, seedUrls, options = {}) {
  */
 export class DocumentationCrawler {
   constructor(options = {}) {
-    this.maxPages = options.maxPages || 30;
-    this.maxDepth = options.maxDepth || 3;
+    // 0 means unlimited for both of these.
+    this.maxPages = options.maxPages === 0 ? Infinity : (options.maxPages || 30);
+    this.maxDepth = options.maxDepth === 0 ? Infinity : (options.maxDepth ?? 3);
     this.concurrency = options.concurrency || 3;
     this.delayMs = options.delayMs || 200;
     this.scope = options.scope || 'subtree'; // 'subtree' | 'domain' | 'custom'
@@ -269,7 +270,7 @@ export class DocumentationCrawler {
         if (current.depth < this.maxDepth) {
           for (const link of extractedLinks) {
             if (!visited.has(link.url) && !queue.some(item => item.url === link.url)) {
-              if (queue.length + crawledPages.length < this.maxPages * 2) {
+              if (!Number.isFinite(this.maxPages) || queue.length + crawledPages.length < this.maxPages * 2) {
                 queue.push({
                   url: link.url,
                   depth: current.depth + 1,

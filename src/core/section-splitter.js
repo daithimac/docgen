@@ -106,7 +106,8 @@ export function splitMarkdownIntoSections(markdown, options = {}) {
   }
 
   if (sections.length < minSections) return null;
-  if (sections.length > maxSections) return null;
+  // maxSections of 0 means "no ceiling".
+  if (maxSections > 0 && sections.length > maxSections) return null;
 
   return { preamble: preamble.trim(), sections };
 }

@@ -2,6 +2,21 @@ import yaml from 'js-yaml';
 import { detectCodeLanguage, EXECUTABLE_LANGUAGES, classifyConceptType } from './parser.js';
 
 /**
+ * Coerces a frontmatter value to usable text.
+ *
+ * YAML is not a string format: `title: 2024` is a number, `date:` is a Date,
+ * and a field can be a list or a map. Anything that is not scalar is discarded
+ * rather than stringified into noise like "[object Object]".
+ */
+export function toText(value) {
+  if (value === null || value === undefined) return '';
+  if (typeof value === 'string') return value;
+  if (typeof value === 'number' || typeof value === 'boolean') return String(value);
+  if (value instanceof Date) return value.toISOString();
+  return '';
+}
+
+/**
  * Splits an optional YAML frontmatter block off the top of a markdown document.
  */
 export function splitFrontmatter(markdown) {
@@ -101,7 +116,9 @@ export function extractMarkdownHeadings(body) {
  * put badges and logos inside headings, which must not leak into titles.
  */
 export function stripHtmlTags(text) {
-  return (text || '')
+  // YAML frontmatter yields numbers, dates and booleans as well as strings,
+  // so never assume a string arrived here.
+  return String(text ?? '')
     .replace(/<[^>]*>/g, ' ')
     .replace(/&nbsp;/g, ' ')
     .replace(/\s+/g, ' ')
@@ -113,7 +130,7 @@ export function stripHtmlTags(text) {
  */
 function stripInlineMarkdown(text) {
   return stripHtmlTags(
-    (text || '')
+    String(text ?? '')
       .replace(/!\[[^\]]*\]\([^)]*\)/g, '')
       // Badge rows are links wrapping an image; once the image is gone the
       // link is empty and should disappear rather than leave bare brackets.
@@ -203,7 +220,7 @@ export function parseMarkdownDocument(markdown, url = '', hints = {}) {
   const headings = extractMarkdownHeadings(body);
   const codeBlocks = extractMarkdownCodeBlocks(body);
 
-  let title = frontmatter.title || hints.title || '';
+  let title = toText(frontmatter.title) || toText(hints.title) || '';
   if (!title) {
     const h1 = headings.find(h => h.level === 1);
     title = h1 ? h1.text : '';
@@ -211,18 +228,18 @@ export function parseMarkdownDocument(markdown, url = '', hints = {}) {
   if (!title) title = titleFromPath(url);
   title = stripInlineMarkdown(title) || titleFromPath(url);
 
-  let description = frontmatter.description || frontmatter.summary || hints.description || '';
+  let description = toText(frontmatter.description) || toText(frontmatter.summary) || toText(hints.description) || '';
   if (!description) description = firstParagraph(body);
   description = stripInlineMarkdown(description).slice(0, 400);
 
   const tags = new Set();
   const fmTags = frontmatter.tags || frontmatter.keywords;
   if (Array.isArray(fmTags)) {
-    fmTags.forEach(t => t && tags.add(String(t).toLowerCase()));
+    fmTags.forEach(t => { const v = toText(t); if (v) tags.add(v.toLowerCase()); });
   } else if (typeof fmTags === 'string') {
     fmTags.split(',').forEach(t => t.trim() && tags.add(t.trim().toLowerCase()));
   }
-  const section = frontmatter.section || hints.section || 'General';
+  const section = toText(frontmatter.section) || toText(hints.section) || 'General';
   if (section) tags.add(String(section).toLowerCase().replace(/[^a-z0-9]+/g, '-'));
   if (hints.tags) hints.tags.forEach(t => t && tags.add(String(t).toLowerCase()));
 
@@ -230,7 +247,7 @@ export function parseMarkdownDocument(markdown, url = '', hints = {}) {
   lastModified = String(lastModified || new Date().toISOString().split('T')[0]);
   if (lastModified.includes('T')) lastModified = lastModified.split('T')[0];
 
-  const type = frontmatter.type || hints.type || classifyConceptType(title, codeBlocks);
+  const type = toText(frontmatter.type) || toText(hints.type) || classifyConceptType(title, codeBlocks);
 
   // Drop a leading H1 that duplicates the title - the builder emits its own.
   let markdownBody = body.trim();
@@ -242,13 +259,13 @@ export function parseMarkdownDocument(markdown, url = '', hints = {}) {
   return {
     url,
     title,
-    siteName: frontmatter.site_name || hints.siteName || '',
+    siteName: toText(frontmatter.site_name) || toText(hints.siteName) || '',
     description: description || `${title} documentation.`,
     section,
     breadcrumbs: hints.breadcrumbs || [],
     tags: Array.from(tags),
     type,
-    author: frontmatter.author || hints.author || 'Documentation Team',
+    author: toText(frontmatter.author) || toText(hints.author) || 'Documentation Team',
     lastModified,
     headings,
     codeBlocks,

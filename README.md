@@ -33,6 +33,29 @@ As a reference point, the Looker API 4.0 specification (1 MB, 479 operations, 33
 
 > **Browser note**: some API hosts reject cross-origin requests outright (the Looker host above 404s any request carrying an `Origin` header). Those specs cannot be fetched by the static GitHub Pages build - use the server or the CLI. DocGen says so explicitly rather than reporting a bare fetch failure.
 
+### Ingestion limits and large repositories
+
+Every cap accepts **0 to mean unlimited**, and `--unlimited` clears them all at once:
+
+```bash
+node bin/docgen.js --source "https://github.com/gohugoio/hugoDocs" --unlimited --out ./bundles/hugo
+```
+
+| Limit | Default | Applies to |
+| --- | --- | --- |
+| `--max-files` | 100 | Documentation files read per repository |
+| `--max-pages` | 25 | Pages crawled per web source |
+| `--max-depth` | 3 | Link depth when crawling |
+| `--max-sections` | 50 | Sections before a document is left whole rather than split |
+| `--read-concurrency` | 8 | Files fetched in parallel per repository |
+| `--fetch-mode` | `auto` | `clone`, `api`, or automatic |
+
+**Large repositories are cloned, not fetched file by file.** Past ~250 documentation files - or whenever the GitHub/GitLab tree API reports that it could not list the repository completely - DocGen shallow-clones instead and reads from local disk. On the Hugo documentation repository (1,003 markdown files) that is the difference between **2 seconds and 105 seconds**, and both paths produce identical bundles.
+
+Cloning is Node-only, so the static browser build keeps the API path; a repository too large for the tree API says so explicitly there rather than returning a partial bundle silently.
+
+**An incomplete bundle always says so.** Whenever a cap truncates the input, the tree API cannot enumerate a repository, or a file cannot be read, the run reports it — in the CLI as a `THIS BUNDLE IS INCOMPLETE` block, in the UI as warnings in the progress log, and in the API response as a `warnings` array. A bundle that reports no warnings is complete.
+
 ### Section splitting
 
 A single document often holds many independent concepts - a metrics reference where every `##` heading is a separate metric, for example. DocGen detects this and emits one OKF concept per section, in a directory named after the document:
@@ -145,14 +168,17 @@ node bin/docgen.js \
 | `-s, --source <sources...>` | Documentation URLs, API specs, git repos, markdown URLs, or local `.docx`/`.md`/`.txt`/`.pdf` files | *(Required)* |
 | `-u, --url <urls...>` | Alias for `--source`, kept for backwards compatibility | |
 | `-o, --out <path>` | Output directory path | `./okf-bundle` |
-| `-p, --max-pages <n>` | Maximum pages to crawl per web source | `25` |
-| `-d, --max-depth <n>` | Maximum link depth | `3` |
-| `-f, --max-files <n>` | Maximum documentation files to read per repository | `100` |
+| `-p, --max-pages <n>` | Maximum pages to crawl per web source (0 = unlimited) | `25` |
+| `-d, --max-depth <n>` | Maximum link depth (0 = unlimited) | `3` |
+| `-f, --max-files <n>` | Maximum documentation files to read per repository (0 = unlimited) | `100` |
 | `--scope <scope>` | Crawl boundary (`subtree` or `domain`) | `subtree` |
 | `--github-token <token>` | Token used to raise GitHub/GitLab API rate limits | `$GITHUB_TOKEN` |
+| `--unlimited` | Remove every cap: pages, depth, files per repo, sections | `false` |
+| `-c, --read-concurrency <n>` | Files fetched in parallel per repository | `8` |
+| `--fetch-mode <mode>` | Repository access: `auto`, `clone` or `api` | `auto` |
 | `--no-split` | Keep each source document as a single concept | `false` |
 | `--min-sections <n>` | Sections a document needs before it is split | `3` |
-| `--max-sections <n>` | Above this many sections a document is left whole | `50` |
+| `--max-sections <n>` | Above this many sections a document is left whole (0 = unlimited) | `50` |
 | `--no-computations` | Disable Attested Computation extraction | `false` |
 
 ---
@@ -161,7 +187,7 @@ node bin/docgen.js \
 
 | Endpoint | Purpose |
 | --- | --- |
-| `POST /api/generate` | Canonical multi-source generation. Body: `{ sources, maxPages, maxDepth, scope, maxFiles, githubToken, computations, splitSections, minSections, maxSections, sessionId }` |
+| `POST /api/generate` | Canonical multi-source generation. Body: `{ sources, maxPages, maxDepth, scope, maxFiles, unlimited, readConcurrency, fetchMode, githubToken, computations, splitSections, minSections, maxSections, sessionId }`. Responds with a `warnings` array — non-empty means the bundle is incomplete. |
 | `POST /api/upload` | Same as above, as `multipart/form-data` with `files` attached (25 MB per file) |
 | `POST /api/describe-sources` | Classifies inputs without fetching - drives the UI's source-type chips |
 | `POST /api/crawl` | Legacy alias for `/api/generate` |

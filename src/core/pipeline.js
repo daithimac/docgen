@@ -18,15 +18,18 @@ export async function generateBundle(inputs, options = {}) {
     onProgress,
     timestamp: options.timestamp,
     options: {
-      maxPages: options.maxPages ? parseInt(options.maxPages, 10) : 25,
-      maxDepth: options.maxDepth ? parseInt(options.maxDepth, 10) : 3,
+      // 0 means unlimited for each of these caps.
+      maxPages: options.maxPages === undefined ? 25 : parseInt(options.maxPages, 10),
+      maxDepth: options.maxDepth === undefined ? 3 : parseInt(options.maxDepth, 10),
       scope: options.scope || 'subtree',
-      maxFiles: options.maxFiles ? parseInt(options.maxFiles, 10) : 100,
+      maxFiles: options.maxFiles === undefined ? 100 : parseInt(options.maxFiles, 10),
+      readConcurrency: options.readConcurrency,
+      fetchMode: options.fetchMode,
       githubToken: options.githubToken || ''
     }
   };
 
-  const { documents, sources, errors } = await ingestSources(inputs, ctx);
+  const { documents, sources, errors, warnings } = await ingestSources(inputs, ctx);
 
   onProgress({ type: 'building_bundle', message: 'Generating OKF v0.2 bundle structure...' });
 
@@ -36,8 +39,8 @@ export async function generateBundle(inputs, options = {}) {
     timestamp: options.timestamp,
     splitSections: options.splitSections !== false,
     splitOptions: {
-      ...(options.minSections ? { minSections: parseInt(options.minSections, 10) } : {}),
-      ...(options.maxSections ? { maxSections: parseInt(options.maxSections, 10) } : {})
+      ...(options.minSections !== undefined ? { minSections: parseInt(options.minSections, 10) } : {}),
+      ...(options.maxSections !== undefined ? { maxSections: parseInt(options.maxSections, 10) } : {})
     }
   });
 
@@ -50,9 +53,16 @@ export async function generateBundle(inputs, options = {}) {
   onProgress({ type: 'validating', message: 'Validating OKF v0.2 compliance...' });
   const validation = validateOKFBundle(bundle.files);
 
-  const files = {};
-  for (const [filePath, content] of bundle.files.entries()) {
-    files[filePath] = content;
+  // The CLI writes straight to disk, so copying every file into a second plain
+  // object would double peak memory on a large bundle for no reason.
+  let files;
+  if (options.filesAs === 'map') {
+    files = bundle.files;
+  } else {
+    files = {};
+    for (const [filePath, content] of bundle.files.entries()) {
+      files[filePath] = content;
+    }
   }
 
   onProgress({ type: 'done', message: 'OKF Bundle successfully built and verified!' });
@@ -68,6 +78,7 @@ export async function generateBundle(inputs, options = {}) {
     folders: bundle.folders,
     sources: bundle.sources,
     sourceErrors: errors,
+    warnings,
     files,
     validation,
     graph: buildBundleGraph(bundle.files)
