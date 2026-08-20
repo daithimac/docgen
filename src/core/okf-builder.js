@@ -24,6 +24,10 @@ export function slugify(text) {
  */
 export const MAX_SLUG_LENGTH = 60;
 
+// How many concepts of a section the root index lists before deferring to the
+// section's own index. Keeps the root readable on large API specifications.
+export const ROOT_INDEX_ENTRIES_PER_SECTION = 12;
+
 /**
  * Keeps filenames readable when a concept title is a full sentence, trimming
  * at a word boundary rather than mid-word.
@@ -285,7 +289,10 @@ export class OKFBundleBuilder {
       const wantsRoot = doc.isRoot === true || (doc.isRoot === undefined && index === 0);
       documentMeta.push(parsed);
 
-      const split = this.splitSections
+      // Documents an adapter already emitted as a single concept - an API
+      // endpoint, a schema model - carry their own section headings as
+      // internal structure, not as a catalogue of sibling concepts.
+      const split = this.splitSections && doc.splittable !== false
         ? splitMarkdownIntoSections(parsed.markdownBody, this.splitOptions)
         : null;
 
@@ -457,7 +464,16 @@ export class OKFBundleBuilder {
     });
 
     // Step 4: Generate Bundle Root index.md (with okf_version: "0.2")
-    const rootParsed = parsedPages.find(p => !p.pathInfo.folder)?.parsed || documentMeta[0] || parsedPages[0]?.parsed;
+    // Bundle headline. A root concept wins; otherwise a source that names itself
+    // (an API spec knows its title, a bare URL does not) beats falling back to
+    // whichever concept happened to be emitted first.
+    const namedSource = sources.length === 1 && sources[0].title && sources[0].title !== sources[0].url
+      ? sources[0]
+      : null;
+    const rootParsed = parsedPages.find(p => !p.pathInfo.folder)?.parsed
+      || (namedSource ? { title: namedSource.title, description: namedSource.description, siteName: namedSource.title } : null)
+      || documentMeta[0]
+      || parsedPages[0]?.parsed;
     const folderTitles = new Map(Array.from(folderOverviews.entries()).map(([f, o]) => [f, o.title]));
     const rootIndexContent = this.generateRootIndex(folderConceptsMap, folders, computations, rootParsed, sources, folderTitles);
     bundleFiles.set('index.md', rootIndexContent);
@@ -546,9 +562,16 @@ export class OKFBundleBuilder {
       content += `## ${folderTitle}\n\n`;
       content += `* [${folderTitle} Directory](${folder}/index.md) - Section overview and index.\n`;
 
-      concepts.forEach(({ pathInfo, parsed }) => {
+      // Progressive disclosure: a large section is represented by its directory
+      // plus a sample, not by reproducing hundreds of entries in the root index.
+      const shown = concepts.slice(0, ROOT_INDEX_ENTRIES_PER_SECTION);
+      shown.forEach(({ pathInfo, parsed }) => {
         content += `* [${parsed.title}](${pathInfo.relativePath}) - ${parsed.description || parsed.title}\n`;
       });
+      const hidden = concepts.length - shown.length;
+      if (hidden > 0) {
+        content += `* …and ${hidden} more in [${folderTitle}](${folder}/index.md).\n`;
+      }
       content += `\n`;
     });
 

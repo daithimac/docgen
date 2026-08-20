@@ -101,7 +101,17 @@ export function createBrowserFetcher(options = {}) {
         if (!res.ok) throw new Error(`HTTP ${res.status}`);
         return res;
       } catch (proxyErr) {
-        throw toFetchError(url, directErr);
+        // Both the direct request and the proxy failed. In a browser this is
+        // almost always the host refusing cross-origin requests rather than the
+        // resource being missing, so say what actually works instead.
+        const error = new Error(
+          `${url} could not be fetched from the browser (${directErr.message}). ` +
+          'The host does not allow cross-origin requests and the fallback proxy could not reach it either. ' +
+          'Run this source through the DocGen server or the CLI, which fetch it directly.'
+        );
+        error.url = url;
+        error.isCrossOriginBlocked = true;
+        throw error;
       }
     }
   };

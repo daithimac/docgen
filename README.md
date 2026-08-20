@@ -12,11 +12,26 @@ Sources are detected automatically - paste any mix of them, comma or newline sep
 | --- | --- | --- |
 | **Documentation sites** | `https://docs.cloud.google.com/bigquery/docs/...` | Section-aware crawl with configurable depth, page limit and scope |
 | **Generic web pages** | any HTTP(S) page | Set *Max Pages* to 1 to ingest a single article without traversal |
-| **OpenAPI / Swagger** | `.../swagger.json`, `.../openapi.yaml`, a SwaggerUI or Redoc page | v2 and v3, JSON or YAML; endpoints and schemas become concepts |
+| **OpenAPI / Swagger** | `.../swagger.json`, `.../openapi.yaml`, a SwaggerUI or Redoc page | v2 and v3, JSON or YAML; endpoints and schemas become concepts (see [Large API specifications](#large-api-specifications)) |
 | **Git repositories** | `https://github.com/owner/repo`, `https://gitlab.com/group/project`, `git@host:owner/repo.git`, `https://host/owner/repo.git` | Reads `README`, `*.md`/`*.mdx` and any detected API spec files. GitHub/GitLab use their REST API; other hosts use a shallow `git clone` |
 | **Markdown pages** | `https://raw.githubusercontent.com/.../README.md`, GitHub `/blob/` URLs | Frontmatter, headings and fenced code are all preserved |
 | **Uploaded documents** | `.docx`, `.md`, `.mdx`, `.txt`, `.pdf` | Drag and drop in the UI, `--source ./path/to/file.docx` on the CLI, or `POST /api/upload` |
 | **Google Docs** | `https://docs.google.com/document/d/<id>/edit` | Requires link sharing set to "Anyone with the link" - the doc is exported as `.docx`. No OAuth involved |
+
+### Large API specifications
+
+A production API specification is mostly cross-references, and DocGen resolves them rather than flattening them away:
+
+* **Endpoints are named after their `operationId`** (`create-query-task.md`), falling back to a properly separated path slug. Path parameters no longer collapse into a run-on word.
+* **Request bodies get their own section**, linked to the schema concept they reference, instead of appearing as an untyped `body` row.
+* **Responses carry their return type**, linked - `200 | [Query](/schemas/query.md) | Query`.
+* **Schema properties keep their types**: `$ref` becomes a link, `array of $ref` keeps its element link, formats and enum values are shown, and required/read-only are marked.
+* **Composed models** (`allOf`, `oneOf`, `anyOf`) name their parts and surface inherited properties by resolving referenced branches.
+* **The root index stays readable**: each section links to its own directory index and lists a sample, deferring the rest ("…and 28 more"). Section indexes still list everything.
+
+As a reference point, the Looker API 4.0 specification (1 MB, 479 operations, 338 models) produces **855 files across 36 directories in under a second**, with 2,679 internal cross-links and zero broken links, at 100% OKF v0.2 conformance.
+
+> **Browser note**: some API hosts reject cross-origin requests outright (the Looker host above 404s any request carrying an `Origin` header). Those specs cannot be fetched by the static GitHub Pages build - use the server or the CLI. DocGen says so explicitly rather than reporting a bare fetch failure.
 
 ### Section splitting
 
