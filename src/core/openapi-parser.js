@@ -138,6 +138,95 @@ export function parseOpenApiSpec(spec, sourceUrl) {
   };
 }
 
+
+/**
+ * Renders the markdown body for a single API endpoint.
+ * Shared by the standalone OpenAPI bundle builder and the OpenAPI source adapter.
+ */
+export function renderEndpointMarkdown(ep, parsedApi, sourceUrl, sourceId) {
+    let body = `# ${ep.method} ${ep.path}\n\n`;
+    body += `**${ep.summary}**\n\n`;
+    if (ep.description && ep.description !== ep.summary) {
+      body += `${ep.description}\n\n`;
+    }
+
+    body += `## Request Details\n\n`;
+    body += `* **HTTP Method**: \`${ep.method}\`\n`;
+    body += `* **Endpoint Path**: \`${ep.path}\`\n`;
+    if (parsedApi.baseUrl) {
+      body += `* **Full URL**: \`${parsedApi.baseUrl}${ep.path}\`\n`;
+    }
+    body += `* **Consumes**: \`${ep.consumes.join(', ')}\`\n`;
+    body += `* **Produces**: \`${ep.produces.join(', ')}\`\n\n`;
+
+    // Parameters Table
+    if (ep.parameters.length > 0) {
+      body += `## Parameters\n\n`;
+      body += `| Parameter | In | Type | Required | Description |\n`;
+      body += `| --- | --- | --- | --- | --- |\n`;
+      ep.parameters.forEach(p => {
+        const type = p.type || p.schema?.type || 'string';
+        const req = p.required ? '**Yes**' : 'No';
+        const desc = (p.description || '').replace(/[\r\n]+/g, ' ').trim() || '-';
+        body += `| \`${p.name}\` | ${p.in} | \`${type}\` | ${req} | ${desc} |\n`;
+      });
+      body += `\n`;
+    }
+
+    // Responses Table
+    if (ep.responses.length > 0) {
+      body += `## Responses\n\n`;
+      body += `| HTTP Status | Description |\n`;
+      body += `| --- | --- |\n`;
+      ep.responses.forEach(r => {
+        body += `| \`${r.code}\` | ${r.description} |\n`;
+      });
+      body += `\n`;
+    }
+
+    // Example Code snippet
+    body += `## Code Examples\n\n`;
+    body += `### cURL\n\n`;
+    body += `\`\`\`bash\ncurl -X ${ep.method} "${parsedApi.baseUrl || 'https://api.example.com'}${ep.path}" \\\n  -H "Accept: application/json"\n\`\`\`\n\n`;
+
+    body += `### Python (requests)\n\n`;
+    body += `\`\`\`python\nimport requests\n\nurl = "${parsedApi.baseUrl || 'https://api.example.com'}${ep.path}"\nheaders = {"Accept": "application/json"}\n\nresponse = requests.${ep.method.toLowerCase()}(url, headers=headers)\nprint(response.status_code)\nprint(response.json())\n\`\`\`\n\n`;
+
+    body += `---\n\n[^${sourceId}]: [${parsedApi.title}](${sourceUrl}) - OpenAPI Specification\n`;
+
+  return body;
+}
+
+
+/**
+ * Renders the markdown body for a single schema / data model definition.
+ */
+export function renderSchemaMarkdown(schemaName, schemaObj, parsedApi, sourceUrl, sourceId) {
+    let body = `# ${schemaName}\n\n`;
+    if (schemaObj.description) {
+      body += `${schemaObj.description}\n\n`;
+    }
+
+    body += `## Schema Properties\n\n`;
+    if (schemaObj.properties && typeof schemaObj.properties === 'object') {
+      body += `| Property | Type | Format | Description |\n`;
+      body += `| --- | --- | --- | --- |\n`;
+      for (const [propName, propObj] of Object.entries(schemaObj.properties)) {
+        const type = propObj.type || (propObj.$ref ? `[${propObj.$ref.split('/').pop()}](./${slugify(propObj.$ref.split('/').pop())}.md)` : 'object');
+        const format = propObj.format || '-';
+        const desc = (propObj.description || '').replace(/[\r\n]+/g, ' ').trim() || '-';
+        body += `| \`${propName}\` | ${type} | \`${format}\` | ${desc} |\n`;
+      }
+      body += `\n`;
+    } else {
+      body += `\`\`\`json\n${JSON.stringify(schemaObj, null, 2)}\n\`\`\`\n\n`;
+    }
+
+    body += `---\n\n[^${sourceId}]: [${parsedApi.title}](${sourceUrl}) - Schema Model\n`;
+
+  return body;
+}
+
 /**
  * Builds a complete OKF v0.2 bundle from an OpenAPI specification.
  */
@@ -191,56 +280,7 @@ export function buildOKFBundleFromOpenApi(parsedApi, sourceUrl, options = {}) {
         description: ep.summary || ep.description
       });
 
-      // Build Endpoint Markdown Body
-      let body = `# ${ep.method} ${ep.path}\n\n`;
-      body += `**${ep.summary}**\n\n`;
-      if (ep.description && ep.description !== ep.summary) {
-        body += `${ep.description}\n\n`;
-      }
-
-      body += `## Request Details\n\n`;
-      body += `* **HTTP Method**: \`${ep.method}\`\n`;
-      body += `* **Endpoint Path**: \`${ep.path}\`\n`;
-      if (parsedApi.baseUrl) {
-        body += `* **Full URL**: \`${parsedApi.baseUrl}${ep.path}\`\n`;
-      }
-      body += `* **Consumes**: \`${ep.consumes.join(', ')}\`\n`;
-      body += `* **Produces**: \`${ep.produces.join(', ')}\`\n\n`;
-
-      // Parameters Table
-      if (ep.parameters.length > 0) {
-        body += `## Parameters\n\n`;
-        body += `| Parameter | In | Type | Required | Description |\n`;
-        body += `| --- | --- | --- | --- | --- |\n`;
-        ep.parameters.forEach(p => {
-          const type = p.type || p.schema?.type || 'string';
-          const req = p.required ? '**Yes**' : 'No';
-          const desc = (p.description || '').replace(/[\r\n]+/g, ' ').trim() || '-';
-          body += `| \`${p.name}\` | ${p.in} | \`${type}\` | ${req} | ${desc} |\n`;
-        });
-        body += `\n`;
-      }
-
-      // Responses Table
-      if (ep.responses.length > 0) {
-        body += `## Responses\n\n`;
-        body += `| HTTP Status | Description |\n`;
-        body += `| --- | --- |\n`;
-        ep.responses.forEach(r => {
-          body += `| \`${r.code}\` | ${r.description} |\n`;
-        });
-        body += `\n`;
-      }
-
-      // Example Code snippet
-      body += `## Code Examples\n\n`;
-      body += `### cURL\n\n`;
-      body += `\`\`\`bash\ncurl -X ${ep.method} "${parsedApi.baseUrl || 'https://api.example.com'}${ep.path}" \\\n  -H "Accept: application/json"\n\`\`\`\n\n`;
-
-      body += `### Python (requests)\n\n`;
-      body += `\`\`\`python\nimport requests\n\nurl = "${parsedApi.baseUrl || 'https://api.example.com'}${ep.path}"\nheaders = {"Accept": "application/json"}\n\nresponse = requests.${ep.method.toLowerCase()}(url, headers=headers)\nprint(response.status_code)\nprint(response.json())\n\`\`\`\n\n`;
-
-      body += `---\n\n[^${sourceId}]: [${parsedApi.title}](${sourceUrl}) - OpenAPI Specification\n`;
+      const body = renderEndpointMarkdown(ep, parsedApi, sourceUrl, sourceId);
 
       // Build Frontmatter
       const frontmatterObj = {
@@ -291,27 +331,7 @@ export function buildOKFBundleFromOpenApi(parsedApi, sourceUrl, options = {}) {
         description: schemaObj.description || `${schemaName} data model definition.`
       });
 
-      let body = `# ${schemaName}\n\n`;
-      if (schemaObj.description) {
-        body += `${schemaObj.description}\n\n`;
-      }
-
-      body += `## Schema Properties\n\n`;
-      if (schemaObj.properties && typeof schemaObj.properties === 'object') {
-        body += `| Property | Type | Format | Description |\n`;
-        body += `| --- | --- | --- | --- |\n`;
-        for (const [propName, propObj] of Object.entries(schemaObj.properties)) {
-          const type = propObj.type || (propObj.$ref ? `[${propObj.$ref.split('/').pop()}](./${slugify(propObj.$ref.split('/').pop())}.md)` : 'object');
-          const format = propObj.format || '-';
-          const desc = (propObj.description || '').replace(/[\r\n]+/g, ' ').trim() || '-';
-          body += `| \`${propName}\` | ${type} | \`${format}\` | ${desc} |\n`;
-        }
-        body += `\n`;
-      } else {
-        body += `\`\`\`json\n${JSON.stringify(schemaObj, null, 2)}\n\`\`\`\n\n`;
-      }
-
-      body += `---\n\n[^${sourceId}]: [${parsedApi.title}](${sourceUrl}) - Schema Model\n`;
+      const body = renderSchemaMarkdown(schemaName, schemaObj, parsedApi, sourceUrl, sourceId);
 
       const fm = {
         type: 'Reference',
@@ -384,4 +404,69 @@ export function buildOKFBundleFromOpenApi(parsedApi, sourceUrl, options = {}) {
     folders: Array.from(folders),
     files: bundleFiles
   };
+}
+
+/**
+ * Strips the chrome the standalone renderers add (leading H1 + trailing source
+ * footnote) so the unified bundle builder can supply its own.
+ */
+function stripRenderedChrome(body) {
+  return body
+    .replace(/^#\s+.*\r?\n+/, '')
+    .replace(/\n*---\s*\n+\[\^[^\]]+\]:.*\s*$/, '')
+    .trim();
+}
+
+/**
+ * Converts a parsed OpenAPI spec into normalized source documents so an API
+ * spec can be merged into a bundle alongside web pages, repos and uploads.
+ */
+export function openApiToDocuments(parsedApi, sourceUrl, options = {}) {
+  const sourceId = options.sourceId || slugify(parsedApi.title || 'api');
+  const footnoteId = `src-${slugify(parsedApi.title).slice(0, 20)}`;
+  const author = parsedApi.contact?.name || 'API Provider';
+  const lastModified = (options.timestamp || new Date().toISOString()).split('T')[0];
+  const documents = [];
+
+  for (const [tagName, endpoints] of parsedApi.sectionsMap.entries()) {
+    endpoints.forEach(ep => {
+      documents.push({
+        sourceId,
+        sourceType: 'openapi',
+        url: parsedApi.baseUrl ? `${parsedApi.baseUrl}${ep.path}` : sourceUrl,
+        section: tagName,
+        markdown: stripRenderedChrome(renderEndpointMarkdown(ep, parsedApi, sourceUrl, footnoteId)),
+        absolutizeLinks: false,
+        title: `${ep.method} ${ep.path} - ${ep.summary}`,
+        description: ep.summary || ep.description || `${ep.method} ${ep.path} API endpoint.`,
+        type: 'API Endpoint',
+        tags: ['api', 'endpoint', ...ep.tags.map(t => slugify(t))],
+        author,
+        lastModified,
+        siteName: parsedApi.title,
+        slugHint: slugify(`${ep.method}-${ep.path}`)
+      });
+    });
+  }
+
+  for (const [schemaName, schemaObj] of parsedApi.schemasMap.entries()) {
+    documents.push({
+      sourceId,
+      sourceType: 'openapi',
+      url: sourceUrl,
+      section: 'Schemas',
+      markdown: stripRenderedChrome(renderSchemaMarkdown(schemaName, schemaObj, parsedApi, sourceUrl, footnoteId)),
+      absolutizeLinks: false,
+      title: `${schemaName} Schema Model`,
+      description: schemaObj.description || `${schemaName} data model reference.`,
+      type: 'Reference',
+      tags: ['api', 'schema', 'model', slugify(schemaName)],
+      author,
+      lastModified,
+      siteName: parsedApi.title,
+      slugHint: slugify(schemaName)
+    });
+  }
+
+  return documents;
 }

@@ -1,7 +1,8 @@
 import yaml from 'js-yaml';
 import { parseDocumentationHtml } from './parser.js';
+import { parseMarkdownDocument } from './markdown-parser.js';
 import { htmlToMarkdown } from './markdown-converter.js';
-import { buildOKFBundleFromOpenApi } from './openapi-parser.js';
+import { SOURCE_TYPE_LABELS } from './sources/types.js';
 
 /**
  * Creates a URL-safe slug from a string.
@@ -19,18 +20,21 @@ export function slugify(text) {
 /**
  * Derives a clean subdirectory and concept filename from URL, section, and title.
  */
-export function getConceptPathInfo(pageData, isRoot = false) {
-  const url = pageData.url;
+export function getConceptPathInfo(pageData, isRoot = false, hints = {}) {
+  const url = pageData.url || '';
   let section = pageData.section || 'general';
-  let slug = '';
+  let slug = hints.slugHint ? slugify(hints.slugHint) : '';
 
-  try {
-    const parsed = new URL(url);
-    const parts = parsed.pathname.split('/').filter(Boolean);
-    if (parts.length > 0) {
-      slug = parts[parts.length - 1].replace(/\.html?$/, '');
-    }
-  } catch (e) {}
+  // Synthetic URLs (upload://, text://) carry no meaningful path.
+  if (!slug && /^https?:\/\//i.test(url)) {
+    try {
+      const parsed = new URL(url);
+      const parts = parsed.pathname.split('/').filter(Boolean);
+      if (parts.length > 0) {
+        slug = slugify(parts[parts.length - 1].replace(/\.(html?|mdx?|markdown)$/i, ''));
+      }
+    } catch (e) {}
+  }
 
   if (!slug) {
     slug = slugify(pageData.title);
@@ -126,34 +130,120 @@ export class OKFBundleBuilder {
   }
 
   /**
-   * Builds the entire OKF bundle from crawled page results.
+   * Accepts either the modern `{ documents, sources }` shape produced by the
+   * source adapters, or the legacy `{ pages: [{ url, html }] }` crawl result.
    */
-  buildBundle(crawlResult) {
-    const { startUrl, pages } = crawlResult;
+  normalizeInput(input) {
+    const startUrl = input.startUrl || '';
+
+    if (Array.isArray(input.documents)) {
+      return {
+        startUrl,
+        sources: input.sources || [],
+        documents: input.documents
+      };
+    }
+
+    // Legacy crawl-result shape: every page is a webpage document.
+    const pages = input.pages || [];
+    return {
+      startUrl,
+      sources: input.sources || [],
+      documents: pages.map((page, index) => ({
+        sourceId: 'crawl',
+        sourceType: 'webpage',
+        url: page.url,
+        html: page.html,
+        section: page.section,
+        isRoot: index === 0 || page.url === startUrl
+      }))
+    };
+  }
+
+  /**
+   * Turns one normalized source document into a parsed concept, regardless of
+   * whether the adapter supplied HTML or markdown.
+   */
+  parseDocument(doc) {
+    const parsed = typeof doc.markdown === 'string'
+      ? parseMarkdownDocument(doc.markdown, doc.url, {
+          section: doc.section,
+          title: doc.title,
+          description: doc.description,
+          type: doc.type,
+          tags: doc.tags,
+          author: doc.author,
+          siteName: doc.siteName,
+          lastModified: doc.lastModified,
+          absolutizeLinks: doc.absolutizeLinks
+        })
+      : parseDocumentationHtml(doc.html || '', doc.url);
+
+    // Adapter-supplied metadata always wins over inferred metadata.
+    if (doc.section) parsed.section = doc.section;
+    if (doc.title) parsed.title = doc.title;
+    if (doc.description) parsed.description = doc.description;
+    if (doc.type) parsed.type = doc.type;
+    if (doc.author) parsed.author = doc.author;
+    if (doc.siteName) parsed.siteName = doc.siteName;
+    if (doc.lastModified) parsed.lastModified = doc.lastModified;
+    if (doc.tags && doc.tags.length) {
+      parsed.tags = Array.from(new Set([...(parsed.tags || []), ...doc.tags]));
+    }
+
+    return parsed;
+  }
+
+  /**
+   * Builds the entire OKF bundle from normalized source documents.
+   */
+  buildBundle(input) {
+    const { startUrl, documents, sources } = this.normalizeInput(input);
     const urlToPathMap = new Map(); // url -> bundleRelativePath
-    const urlToConceptMap = new Map(); // url -> parsedData
     const parsedPages = [];
 
-    // Step 1: Parse all pages and assign bundle paths
-    pages.forEach((page, index) => {
-      const parsed = parseDocumentationHtml(page.html, page.url);
-      if (page.section) {
-        parsed.section = page.section;
+    // Reserved relative paths, so heterogeneous sources merging into shared
+    // topic folders never overwrite one another.
+    const takenPaths = new Set();
+    const reservePath = (folder, filename, sourceId) => {
+      const build = (name) => (folder ? `${folder}/${name}` : name);
+      let candidate = build(filename);
+      if (takenPaths.has(candidate)) {
+        const stem = filename.replace(/\.md$/, '');
+        const suffixed = `${stem}-${slugify(sourceId || 'source')}.md`;
+        candidate = build(suffixed);
+        let n = 2;
+        while (takenPaths.has(candidate)) {
+          candidate = build(`${stem}-${slugify(sourceId || 'source')}-${n++}.md`);
+        }
       }
-      const isRoot = (index === 0 || page.url === startUrl);
-      const pathInfo = getConceptPathInfo(parsed, isRoot);
+      takenPaths.add(candidate);
+      const parts = candidate.split('/');
+      return {
+        folder,
+        filename: parts[parts.length - 1],
+        relativePath: candidate,
+        bundleRelativePath: `/${candidate}`,
+        conceptId: candidate.replace(/\.md$/, '')
+      };
+    };
 
-      urlToPathMap.set(page.url, pathInfo.bundleRelativePath);
-      // Also map without trailing slash or variants
-      const norm = page.url.replace(/\/$/, '');
-      urlToPathMap.set(norm, pathInfo.bundleRelativePath);
+    // Step 1: Parse all documents and assign collision-safe bundle paths
+    let rootClaimed = false;
+    documents.forEach((doc, index) => {
+      const parsed = this.parseDocument(doc);
+      const isRoot = !rootClaimed && (doc.isRoot === true || (doc.isRoot === undefined && index === 0));
+      if (isRoot) rootClaimed = true;
 
-      parsedPages.push({
-        raw: page,
-        parsed,
-        pathInfo
-      });
-      urlToConceptMap.set(page.url, { parsed, pathInfo });
+      const draft = getConceptPathInfo(parsed, isRoot, { slugHint: doc.slugHint });
+      const pathInfo = reservePath(draft.folder, draft.filename, doc.sourceId);
+
+      if (doc.url) {
+        urlToPathMap.set(doc.url, pathInfo.bundleRelativePath);
+        urlToPathMap.set(doc.url.replace(/\/$/, ''), pathInfo.bundleRelativePath);
+      }
+
+      parsedPages.push({ raw: doc, parsed, pathInfo });
     });
 
     const bundleFiles = new Map(); // relativePath -> fileContent
@@ -174,8 +264,10 @@ export class OKFBundleBuilder {
         parsed
       });
 
-      // 2a. Convert HTML body to Markdown
-      let bodyMarkdown = htmlToMarkdown(parsed.htmlBody);
+      // 2a. Use pre-rendered markdown when the adapter supplied it, otherwise convert HTML
+      let bodyMarkdown = typeof parsed.markdownBody === 'string'
+        ? parsed.markdownBody
+        : htmlToMarkdown(parsed.htmlBody);
 
       // 2b. Rewrite internal hyperlinks to bundle-relative OKF paths
       bodyMarkdown = this.rewriteLinks(bodyMarkdown, urlToPathMap, pathInfo);
@@ -200,13 +292,7 @@ export class OKFBundleBuilder {
         const sqlSnippet = parsed.codeBlocks.find(b => b.isExecutable && b.language === 'sql');
         if (sqlSnippet) {
           const compSlug = `comp-${slugify(parsed.title).slice(0, 25)}`;
-          const compPathInfo = {
-            folder: 'computations',
-            filename: `${compSlug}.md`,
-            relativePath: `computations/${compSlug}.md`,
-            bundleRelativePath: `/computations/${compSlug}.md`,
-            conceptId: `computations/${compSlug}`
-          };
+          const compPathInfo = reservePath('computations', `${compSlug}.md`, raw.sourceId);
           folders.add('computations');
 
           const compDoc = this.generateAttestedComputation({
@@ -271,40 +357,26 @@ export class OKFBundleBuilder {
       bundleFiles.set(`${folder}/index.md`, indexContent);
     });
 
-    // Step 3b: Merge any OpenAPI specifications found in multi-URL crawl
-    if (crawlResult.openApiSpecs && crawlResult.openApiSpecs.length > 0) {
-      for (const apiInfo of crawlResult.openApiSpecs) {
-        const apiBundle = buildOKFBundleFromOpenApi(apiInfo.parsedApi, apiInfo.specUrl, {
-          actor: this.actor,
-          timestamp: this.timestamp
-        });
-        for (const [relPath, content] of apiBundle.files.entries()) {
-          if (relPath !== 'index.md' && relPath !== 'log.md') {
-            bundleFiles.set(relPath, content);
-            const folder = relPath.includes('/') ? relPath.split('/')[0] : '';
-            if (folder) folders.add(folder);
-          }
-        }
-      }
-    }
-
     // Step 4: Generate Bundle Root index.md (with okf_version: "0.2")
-    const rootIndexContent = this.generateRootIndex(folderConceptsMap, folders, computations, parsedPages[0]?.parsed);
+    const rootParsed = parsedPages.find(p => !p.pathInfo.folder)?.parsed || parsedPages[0]?.parsed;
+    const rootIndexContent = this.generateRootIndex(folderConceptsMap, folders, computations, rootParsed, sources);
     bundleFiles.set('index.md', rootIndexContent);
 
     // Step 5: Generate log.md
-    const logContent = this.generateLogFile(bundleFiles.size, folders.size, startUrl);
+    const logContent = this.generateLogFile(bundleFiles.size, folders.size, startUrl, sources);
     bundleFiles.set('log.md', logContent);
 
-    const rootParsed = parsedPages[0]?.parsed;
     const siteName = rootParsed?.siteName || '';
-    const bundleName = deriveBundleName(startUrl, rootParsed?.title, siteName);
+    const bundleName = sources.length > 1
+      ? `${slugify(sources[0].title || sources[0].sourceId || 'multi-source')}-knowledge-bundle`
+      : deriveBundleName(startUrl || sources[0]?.url || '', rootParsed?.title, siteName);
 
     return {
       title: rootParsed?.title || this.bundleTitle,
       siteName: siteName || rootParsed?.title || 'Knowledge Base',
       bundleName: bundleName || 'okf-knowledge-bundle',
-      startUrl,
+      startUrl: startUrl || sources.map(src => src.url).filter(Boolean).join(', '),
+      sources,
       conceptCount: parsedPages.length + computations.length,
       folderCount: folders.size,
       folders: Array.from(folders),
@@ -351,7 +423,7 @@ export class OKFBundleBuilder {
   /**
    * Generates Root index.md with okf_version frontmatter and progressive disclosure groups.
    */
-  generateRootIndex(folderConceptsMap, folders, computations, rootPageData) {
+  generateRootIndex(folderConceptsMap, folders, computations, rootPageData, sources = []) {
     const frontmatter = `---\nokf_version: "0.2"\n---\n\n`;
     let content = frontmatter;
     content += `# ${rootPageData?.title || 'Open Knowledge Bundle'}\n\n`;
@@ -384,6 +456,19 @@ export class OKFBundleBuilder {
       content += `* [Computations Directory](computations/index.md) - Sanctioned executable logic and queries.\n`;
       computations.forEach(({ pathInfo, title }) => {
         content += `* [${title}](${pathInfo.relativePath}) - Executable SQL / code computation.\n`;
+      });
+      content += `\n`;
+    }
+
+    // Provenance roll-up: only meaningful once more than one source contributed.
+    if (sources.length > 1) {
+      content += `## Sources\n\n`;
+      content += `This bundle merges knowledge from ${sources.length} sources.\n\n`;
+      sources.forEach(src => {
+        const label = SOURCE_TYPE_LABELS[src.sourceType] || src.sourceType || 'Source';
+        const name = src.title || src.input || src.url || src.sourceId;
+        const link = src.url && /^https?:\/\//i.test(src.url) ? `[${name}](${src.url})` : `\`${name}\``;
+        content += `* ${link} - ${label}, ${src.documentCount || 0} concept document(s).\n`;
       });
       content += `\n`;
     }
@@ -430,8 +515,26 @@ export class OKFBundleBuilder {
   /**
    * Generates log.md
    */
-  generateLogFile(conceptCount, sectionCount, startUrl) {
-    return `# Directory Update Log\n\n## ${this.dateString}\n* **Creation**: Ingested documentation from [${startUrl}](${startUrl}) and generated conformant OKF v0.2 bundle.\n* **Structure**: Created ${conceptCount} concept documents across ${sectionCount} domain categories.\n* **Attestation**: Extracted executable code snippets as Attested Computations where applicable.\n* **Verification**: Marked with automated process confirmation by \`${this.actor}\`.\n`;
+  generateLogFile(conceptCount, sectionCount, startUrl, sources = []) {
+    const origin = sources.length > 0
+      ? sources.map(src => {
+          const label = SOURCE_TYPE_LABELS[src.sourceType] || src.sourceType || 'source';
+          const name = src.title || src.input || src.url || src.sourceId;
+          return src.url && /^https?:\/\//i.test(src.url)
+            ? `[${name}](${src.url}) (${label})`
+            : `${name} (${label})`;
+        }).join(', ')
+      : `[${startUrl}](${startUrl})`;
+
+    let log = `# Directory Update Log\n\n## ${this.dateString}\n`;
+    log += `* **Creation**: Ingested documentation from ${origin} and generated conformant OKF v0.2 bundle.\n`;
+    log += `* **Structure**: Created ${conceptCount} concept documents across ${sectionCount} domain categories.\n`;
+    if (sources.length > 1) {
+      log += `* **Sources**: Merged ${sources.length} heterogeneous sources into shared topic directories.\n`;
+    }
+    log += `* **Attestation**: Extracted executable code snippets as Attested Computations where applicable.\n`;
+    log += `* **Verification**: Marked with automated process confirmation by \`${this.actor}\`.\n`;
+    return log;
   }
 
   formatFolderTitle(folder) {

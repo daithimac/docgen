@@ -1,8 +1,12 @@
 import JSZip from 'jszip';
-import yaml from 'js-yaml';
-import { parseOpenApiSpec, buildOKFBundleFromOpenApi } from '../../core/openapi-parser.js';
 import { validateOKFBundle } from '../../core/validator.js';
 import { OKFBundleBuilder } from '../../core/okf-builder.js';
+import { buildBundleGraph } from '../../core/graph-builder.js';
+import { generateBundle } from '../../core/pipeline.js';
+import { createBrowserFetcher } from '../../core/http.js';
+import { describeSources } from '../../core/sources/registry.js';
+
+export { describeSources };
 
 /**
  * Built-in static demo bundle for BigQuery ELT / ETL Intro
@@ -43,32 +47,6 @@ export function getStaticDemoBundle() {
   for (const [filePath, content] of bundle.files.entries()) {
     filesObject[filePath] = content;
   }
-  const validation = validateOKFBundle(bundle.files);
-
-  const graphNodes = [{ id: 'index.md', label: 'Root Index (v0.2)', type: 'root-index', folder: '' }];
-  const graphLinks = [];
-
-  for (const [filePath, content] of bundle.files.entries()) {
-    if (filePath === 'index.md' || filePath === 'log.md') continue;
-    let docType = 'Concept';
-    let title = filePath;
-    if (content.startsWith('---')) {
-      const typeMatch = content.match(/type:\s*([^\n\r]+)/);
-      if (typeMatch) docType = typeMatch[1].trim();
-      const titleMatch = content.match(/title:\s*([^\n\r]+)/);
-      if (titleMatch) title = titleMatch[1].trim();
-    }
-
-    graphNodes.push({ id: filePath, label: title, type: docType, folder: filePath.includes('/') ? filePath.split('/')[0] : 'root' });
-
-    if (filePath.endsWith('/index.md')) {
-      graphLinks.push({ source: 'index.md', target: filePath, type: 'hierarchy' });
-    } else {
-      const folder = filePath.includes('/') ? filePath.split('/')[0] : '';
-      const parentIndex = folder ? `${folder}/index.md` : 'index.md';
-      graphLinks.push({ source: parentIndex, target: filePath, type: 'contains' });
-    }
-  }
 
   return {
     success: true,
@@ -80,8 +58,8 @@ export function getStaticDemoBundle() {
     folderCount: bundle.folderCount,
     folders: bundle.folders,
     files: filesObject,
-    validation,
-    graph: { nodes: graphNodes, links: graphLinks }
+    validation: validateOKFBundle(bundle.files),
+    graph: buildBundleGraph(bundle.files)
   };
 }
 
@@ -117,111 +95,36 @@ export async function downloadZipInBrowser(files, bundleName = 'okf-knowledge-bu
 }
 
 /**
- * Client-side bundle generator for OpenAPI specs or custom input
+ * Reads browser File objects into upload descriptors the pipeline understands.
  */
-export async function generateBundleInBrowser(rawContentOrUrl, isUrl = true) {
-  let specs = [];
-  let sourceUrl = isUrl ? rawContentOrUrl : 'https://api.example.com/spec.json';
+export async function filesToSourceInputs(fileList) {
+  const files = Array.from(fileList || []);
+  return Promise.all(files.map(async (file) => ({
+    type: 'upload',
+    name: file.name,
+    value: { name: file.name, data: await file.arrayBuffer() }
+  })));
+}
 
-  if (isUrl) {
-    const urls = rawContentOrUrl.split(/[\n,]+/).map(s => s.trim()).filter(Boolean);
+/**
+ * Runs the full multi-source pipeline entirely in the browser.
+ *
+ * This is what keeps the static GitHub Pages build at parity with the server:
+ * the same adapters and bundle builder run here, with a fetch + CORS-proxy
+ * fetcher injected in place of the Node one.
+ */
+export async function generateBundleInBrowser(inputs, options = {}) {
+  return generateBundle(inputs, {
+    ...options,
+    fetcher: createBrowserFetcher()
+  });
+}
 
-    for (const u of urls) {
-      let fetchUrl = u;
-      if (u.includes('api.oireachtas.ie') && !u.endsWith('.json')) {
-        fetchUrl = 'https://api.oireachtas.ie/swagger.json';
-      }
-
-      let fetchedSpec = null;
-      try {
-        const resp = await fetch(fetchUrl);
-        fetchedSpec = await resp.json();
-      } catch (e) {
-        // Try CORS proxy if direct fetch fails on GitHub pages
-        try {
-          const corsUrl = `https://corsproxy.io/?${encodeURIComponent(fetchUrl)}`;
-          const resp = await fetch(corsUrl);
-          fetchedSpec = await resp.json();
-        } catch (err2) {}
-      }
-
-      if (fetchedSpec) {
-        specs.push({ spec: fetchedSpec, url: u });
-      }
-    }
-  } else {
-    // Parse raw text JSON or YAML
-    try {
-      const parsed = typeof rawContentOrUrl === 'string' ? (rawContentOrUrl.trim().startsWith('{') ? JSON.parse(rawContentOrUrl) : yaml.load(rawContentOrUrl)) : rawContentOrUrl;
-      specs.push({ spec: parsed, url: sourceUrl });
-    } catch (err) {
-      throw new Error(`Failed to parse OpenAPI JSON/YAML: ${err.message}`);
-    }
-  }
-
-  if (specs.length > 0) {
-    // Combine specs into bundle
-    let mainParsedApi = null;
-    for (const { spec, url } of specs) {
-      if (spec && (spec.swagger || spec.openapi)) {
-        mainParsedApi = parseOpenApiSpec(spec, url);
-        break;
-      }
-    }
-
-    if (!mainParsedApi) {
-      throw new Error('Could not parse OpenAPI specification from provided URL(s).');
-    }
-
-    const bundle = buildOKFBundleFromOpenApi(mainParsedApi, sourceUrl);
-
-    const filesObject = {};
-    for (const [filePath, content] of bundle.files.entries()) {
-      filesObject[filePath] = content;
-    }
-
-    const validation = validateOKFBundle(bundle.files);
-
-    // Build Graph Data
-    const graphNodes = [{ id: 'index.md', label: 'Root Index (v0.2)', type: 'root-index', folder: '' }];
-    const graphLinks = [];
-
-    for (const [filePath, content] of bundle.files.entries()) {
-      if (filePath === 'index.md' || filePath === 'log.md') continue;
-      let docType = 'Concept';
-      let title = filePath;
-      if (content.startsWith('---')) {
-        const typeMatch = content.match(/type:\s*([^\n\r]+)/);
-        if (typeMatch) docType = typeMatch[1].trim();
-        const titleMatch = content.match(/title:\s*([^\n\r]+)/);
-        if (titleMatch) title = titleMatch[1].trim();
-      }
-
-      graphNodes.push({ id: filePath, label: title, type: docType, folder: filePath.includes('/') ? filePath.split('/')[0] : 'root' });
-
-      if (filePath.endsWith('/index.md')) {
-        graphLinks.push({ source: 'index.md', target: filePath, type: 'hierarchy' });
-      } else {
-        const folder = filePath.includes('/') ? filePath.split('/')[0] : '';
-        const parentIndex = folder ? `${folder}/index.md` : 'index.md';
-        graphLinks.push({ source: parentIndex, target: filePath, type: 'contains' });
-      }
-    }
-
-    return {
-      success: true,
-      title: bundle.title,
-      siteName: bundle.siteName,
-      bundleName: bundle.bundleName,
-      startUrl: sourceUrl,
-      conceptCount: bundle.conceptCount,
-      folderCount: bundle.folderCount,
-      folders: bundle.folders,
-      files: filesObject,
-      validation,
-      graph: { nodes: graphNodes, links: graphLinks }
-    };
-  }
-
-  throw new Error('Content is not a recognized OpenAPI / Swagger specification. Please ensure it contains "swagger" or "openapi" declaration.');
+/**
+ * Convenience wrapper for a drag-and-drop file set, optionally combined with
+ * URL sources typed into the input field.
+ */
+export async function generateBundleFromFiles(fileList, urlInputs = [], options = {}) {
+  const uploads = await filesToSourceInputs(fileList);
+  return generateBundleInBrowser([...(urlInputs || []), ...uploads], options);
 }

@@ -1,7 +1,7 @@
 {
   "name": "docgen-okf",
-  "version": "0.2.0",
-  "description": "Web Documentation Parser and Open Knowledge Format (OKF v0.2) Bundle Generator",
+  "version": "0.3.0",
+  "description": "Multi-Source Documentation Ingestion and Open Knowledge Format (OKF v0.2) Bundle Generator",
   "type": "module",
   "main": "src/server/index.js",
   "bin": {
@@ -14,7 +14,7 @@
     "build": "vite build",
     "preview": "vite preview",
     "docgen": "node bin/docgen.js",
-    "test": "node test/test-okf.js && node test/test-openapi.js && node test/test-multi-url.js"
+    "test": "node test/test-okf.js && node test/test-openapi.js && node test/test-multi-url.js && node test/test-sources.js && node test/test-multi-source.js"
   },
   "dependencies": {
     "archiver": "^7.0.1",
@@ -26,6 +26,9 @@
     "js-yaml": "^4.1.0",
     "jszip": "^3.10.1",
     "lucide-react": "^1.16.0",
+    "mammoth": "^1.12.1",
+    "multer": "^2.2.0",
+    "pdfjs-dist": "^6.2.108",
     "react": "^19.0.0",
     "react-dom": "^19.0.0",
     "turndown": "^7.2.0",

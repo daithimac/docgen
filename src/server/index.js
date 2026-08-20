@@ -2,10 +2,14 @@ import express from 'express';
 import cors from 'cors';
 import path from 'path';
 import { fileURLToPath } from 'url';
-import { DocumentationCrawler } from '../core/crawler.js';
+import multer from 'multer';
 import { OKFBundleBuilder } from '../core/okf-builder.js';
-import { buildOKFBundleFromOpenApi } from '../core/openapi-parser.js';
 import { validateOKFBundle } from '../core/validator.js';
+import { buildBundleGraph } from '../core/graph-builder.js';
+import { generateBundle } from '../core/pipeline.js';
+import { createNodeFetcher } from '../core/http.js';
+import { describeSources, SOURCE_TYPE_LABELS } from '../core/sources/registry.js';
+import { SUPPORTED_UPLOAD_EXTENSIONS } from '../core/sources/upload.js';
 import { createBundleZip, saveBundleToDisk } from '../core/exporter.js';
 
 const __filename = fileURLToPath(import.meta.url);
@@ -45,158 +49,121 @@ app.get('/api/crawl/stream', (req, res) => {
   });
 });
 
-/**
- * Start Crawl & OKF Bundle Generation
- */
-app.post('/api/crawl', async (req, res) => {
-  const {
-    url,
-    urls,
-    maxPages = 20,
-    maxDepth = 3,
-    scope = 'subtree',
-    computations = true,
-    sessionId
-  } = req.body;
+const MAX_UPLOAD_BYTES = 25 * 1024 * 1024;
 
-  const targetUrls = urls || url;
-  if (!targetUrls) {
-    return res.status(400).json({ error: 'URL(s) are required' });
+const upload = multer({
+  storage: multer.memoryStorage(),
+  limits: { fileSize: MAX_UPLOAD_BYTES, files: 20 },
+  fileFilter: (req, file, cb) => {
+    const ext = (file.originalname.match(/\.[a-zA-Z0-9]+$/) || [''])[0].toLowerCase();
+    if (!SUPPORTED_UPLOAD_EXTENSIONS.includes(ext)) {
+      return cb(new Error(`Unsupported upload type "${ext || file.originalname}". Supported: ${SUPPORTED_UPLOAD_EXTENSIONS.join(', ')}.`));
+    }
+    cb(null, true);
+  }
+});
+
+/**
+ * Resolves a request body into the source inputs the pipeline understands.
+ */
+function collectSourceInputs(body = {}, files = []) {
+  const inputs = [];
+
+  const raw = body.sources || body.urls || body.url;
+  if (raw) {
+    if (Array.isArray(raw)) {
+      inputs.push(...raw);
+    } else if (typeof raw === 'string') {
+      inputs.push(raw);
+    }
   }
 
+  for (const file of files) {
+    inputs.push({
+      type: 'upload',
+      name: file.originalname,
+      value: { name: file.originalname, data: file.buffer }
+    });
+  }
+
+  return inputs;
+}
+
+/**
+ * Runs the shared pipeline and streams progress over the session's SSE channel.
+ */
+async function runGeneration(req, res, files = []) {
+  const body = req.body || {};
+  const sessionId = body.sessionId;
   const streamSender = sessionId ? activeCrawlEvents.get(sessionId) : null;
   const emitProgress = (payload) => {
-    if (streamSender) {
-      streamSender(payload);
-    }
+    if (streamSender) streamSender(payload);
   };
 
+  const inputs = collectSourceInputs(body, files);
+  if (inputs.length === 0) {
+    return res.status(400).json({ error: 'At least one source URL or uploaded file is required.' });
+  }
+
   try {
-    const urlDisplay = Array.isArray(targetUrls) ? targetUrls.join(', ') : targetUrls;
-    emitProgress({ type: 'init', message: `Initializing crawler for ${urlDisplay}` });
-
-    const crawler = new DocumentationCrawler({
-      maxPages: parseInt(maxPages, 10),
-      maxDepth: parseInt(maxDepth, 10),
-      scope,
-      onProgress: (p) => {
-        emitProgress(p);
-      },
-      onError: (err) => {
-        emitProgress({ type: 'error', ...err });
-      }
+    const described = describeSources(inputs);
+    emitProgress({
+      type: 'init',
+      message: `Initializing ingestion for ${described.length} source(s): ` +
+        described.map(d => `${d.value} [${SOURCE_TYPE_LABELS[d.type] || d.type}]`).join(', ')
     });
 
-    const crawlResult = await crawler.crawl(targetUrls);
-
-    emitProgress({ type: 'building_bundle', message: 'Generating OKF v0.2 bundle structure...' });
-
-    let bundle;
-    if (crawlResult.isOpenApi) {
-      bundle = buildOKFBundleFromOpenApi(crawlResult.openApiData, crawlResult.startUrl, {
-        actor: 'docgen/okf-api-parser-v0.2'
-      });
-    } else {
-      const builder = new OKFBundleBuilder({
-        includeAttestedComputations: computations,
-        bundleTitle: 'Documentation Knowledge Bundle'
-      });
-      bundle = builder.buildBundle(crawlResult);
-    }
-
-    emitProgress({ type: 'validating', message: 'Validating OKF v0.2 compliance...' });
-
-    // Convert bundle files Map to plain Object for JSON transmission
-    const filesObject = {};
-    for (const [filePath, content] of bundle.files.entries()) {
-      filesObject[filePath] = content;
-    }
-
-    const validation = validateOKFBundle(bundle.files);
-
-    // Build Graph Data for Visualization
-    const graphNodes = [];
-    const graphLinks = [];
-    const nodeSet = new Set();
-
-    // Add Root Node
-    graphNodes.push({
-      id: 'index.md',
-      label: 'Root Index (v0.2)',
-      type: 'root-index',
-      folder: ''
+    const payload = await generateBundle(inputs, {
+      fetcher: createNodeFetcher(),
+      onProgress: emitProgress,
+      maxPages: body.maxPages ?? 20,
+      maxDepth: body.maxDepth ?? 3,
+      scope: body.scope || 'subtree',
+      maxFiles: body.maxFiles ?? 100,
+      githubToken: body.githubToken || process.env.GITHUB_TOKEN || '',
+      computations: body.computations !== false && body.computations !== 'false'
     });
-    nodeSet.add('index.md');
 
-    for (const [filePath, content] of bundle.files.entries()) {
-      if (filePath === 'index.md' || filePath === 'log.md') continue;
-      
-      let docType = 'Concept';
-      let title = filePath;
-      if (content.startsWith('---')) {
-        const typeMatch = content.match(/type:\s*([^\n\r]+)/);
-        if (typeMatch) docType = typeMatch[1].trim();
-        const titleMatch = content.match(/title:\s*([^\n\r]+)/);
-        if (titleMatch) title = titleMatch[1].trim();
-      }
-
-      graphNodes.push({
-        id: filePath,
-        label: title,
-        type: docType,
-        folder: filePath.includes('/') ? filePath.split('/')[0] : 'root'
-      });
-      nodeSet.add(filePath);
-
-      // Connect to root or parent folder index
-      if (filePath.endsWith('/index.md')) {
-        graphLinks.push({ source: 'index.md', target: filePath, type: 'hierarchy' });
-      } else {
-        const folder = filePath.includes('/') ? filePath.split('/')[0] : '';
-        const parentIndex = folder ? `${folder}/index.md` : 'index.md';
-        graphLinks.push({ source: parentIndex, target: filePath, type: 'contains' });
-      }
-
-      // Check for internal links in content
-      const linkMatches = content.matchAll(/\[([^\]]+)\]\(([^)]+)\)/g);
-      for (const match of linkMatches) {
-        let targetHref = match[2];
-        if (targetHref.startsWith('/')) targetHref = targetHref.slice(1);
-        if (targetHref.startsWith('./')) {
-          const folder = filePath.includes('/') ? filePath.split('/')[0] : '';
-          targetHref = folder ? `${folder}/${targetHref.slice(2)}` : targetHref.slice(2);
-        }
-        if (bundle.files.has(targetHref) && targetHref !== filePath) {
-          graphLinks.push({ source: filePath, target: targetHref, type: 'cross-link' });
-        }
-      }
-    }
-
-    const responsePayload = {
-      success: true,
-      title: bundle.title,
-      siteName: bundle.siteName,
-      bundleName: bundle.bundleName,
-      startUrl: bundle.startUrl,
-      conceptCount: bundle.conceptCount,
-      folderCount: bundle.folderCount,
-      folders: bundle.folders,
-      files: filesObject,
-      validation,
-      graph: {
-        nodes: graphNodes,
-        links: graphLinks
-      }
-    };
-
-    emitProgress({ type: 'done', message: 'OKF Bundle successfully built and verified!' });
-
-    res.json(responsePayload);
+    res.json(payload);
   } catch (error) {
-    console.error('Crawl & Generation error:', error);
+    console.error('Ingestion & Generation error:', error);
     emitProgress({ type: 'fatal_error', error: error.message });
     res.status(500).json({ error: error.message });
   }
+}
+
+/**
+ * Canonical multi-source generation endpoint.
+ */
+app.post('/api/generate', (req, res) => runGeneration(req, res));
+
+/**
+ * Legacy crawl endpoint - same pipeline, kept for existing clients.
+ */
+app.post('/api/crawl', (req, res) => runGeneration(req, res));
+
+/**
+ * Multi-source generation with uploaded documents attached.
+ */
+app.post('/api/upload', (req, res) => {
+  upload.array('files', 20)(req, res, (err) => {
+    if (err) {
+      // Surface rejected uploads as JSON, not Express's default HTML error page.
+      const message = err.code === 'LIMIT_FILE_SIZE'
+        ? `Uploaded file exceeds the ${Math.round(MAX_UPLOAD_BYTES / (1024 * 1024))} MB limit.`
+        : err.message;
+      return res.status(400).json({ error: message });
+    }
+    runGeneration(req, res, req.files || []);
+  });
+});
+
+/**
+ * Classify source inputs without fetching anything (drives the UI type chips).
+ */
+app.post('/api/describe-sources', (req, res) => {
+  const inputs = collectSourceInputs(req.body || {});
+  res.json({ sources: describeSources(inputs) });
 });
 
 /**
@@ -306,7 +273,8 @@ app.get('/api/sample', async (req, res) => {
       folderCount: bundle.folderCount,
       folders: bundle.folders,
       files: filesObject,
-      validation
+      validation,
+      graph: buildBundleGraph(bundle.files)
     });
   } catch (err) {
     res.status(500).json({ error: err.message });
