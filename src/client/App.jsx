@@ -8,7 +8,8 @@ import ExportModal from './components/ExportModal.jsx';
 import {
   getStaticDemoBundle,
   downloadZipInBrowser,
-  generateBundleInBrowser
+  generateBundleInBrowser,
+  filesToSourceInputs
 } from './services/client-engine.js';
 
 export default function App() {
@@ -51,9 +52,15 @@ export default function App() {
     setActiveFilePath('index.md');
   };
 
-  const handleStartCrawl = async ({ url, maxPages, maxDepth, scope, computations }) => {
+  const handleStartCrawl = async ({ url, files = [], maxPages, maxDepth, scope, computations, maxFiles, githubToken }) => {
+    const urlList = (url || '')
+      .split(/[\n,]+/)
+      .map((s) => s.trim())
+      .filter(Boolean);
+    const describedInputs = [...urlList, ...files.map((f) => f.name)];
+
     setIsCrawling(true);
-    setProgressLogs([`Starting documentation crawl for: ${url}`]);
+    setProgressLogs([`Starting ingestion for ${describedInputs.length} source(s): ${describedInputs.join(', ')}`]);
     setPagesCrawled(0);
     setTargetMaxPages(maxPages);
 
@@ -72,8 +79,14 @@ export default function App() {
               ...prev,
               `Crawled [${data.pagesCrawled}/${maxPages}] depth ${data.depth}: ${data.url}`
             ]);
-          } else if (data.type === 'crawling') {
+          } else if (data.type === 'crawling' || data.type === 'fetching') {
             setProgressLogs((prev) => [...prev, `Fetching: ${data.url}`]);
+          } else if (data.type === 'source_start' || data.type === 'source_complete' || data.type === 'converting' || data.type === 'cloning') {
+            setProgressLogs((prev) => [...prev, `📥 ${data.message}`]);
+          } else if (data.type === 'openapi_detected') {
+            setProgressLogs((prev) => [...prev, `🧩 ${data.message || `Detected API specification: ${data.title}`}`]);
+          } else if (data.type === 'source_error' || data.type === 'warning') {
+            setProgressLogs((prev) => [...prev, `⚠️ ${data.message}`]);
           } else if (data.type === 'building_bundle') {
             setProgressLogs((prev) => [...prev, `🔨 Building OKF v0.2 concept files and index trees...`]);
           } else if (data.type === 'validating') {
@@ -89,19 +102,35 @@ export default function App() {
       console.warn('SSE not available, falling back to direct request:', e);
     }
 
+    const requestOptions = {
+      sources: urlList,
+      maxPages,
+      maxDepth,
+      scope,
+      computations,
+      maxFiles,
+      githubToken,
+      sessionId
+    };
+
     try {
-      const response = await fetch('/api/crawl', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          url,
-          maxPages,
-          maxDepth,
-          scope,
-          computations,
-          sessionId
-        })
-      });
+      let response;
+      if (files.length > 0) {
+        // Uploads need multipart, so the options ride along as form fields.
+        const formData = new FormData();
+        files.forEach((file) => formData.append('files', file));
+        Object.entries(requestOptions).forEach(([key, value]) => {
+          if (value === undefined || value === null) return;
+          formData.append(key, Array.isArray(value) ? value.join(',') : String(value));
+        });
+        response = await fetch('/api/upload', { method: 'POST', body: formData });
+      } else {
+        response = await fetch('/api/generate', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(requestOptions)
+        });
+      }
 
       if (response.ok) {
         const bundleData = await response.json();
@@ -109,6 +138,7 @@ export default function App() {
         setActiveFilePath('index.md');
         setProgressLogs((prev) => [
           ...prev,
+          ...(bundleData.sourceErrors || []).map((e) => `⚠️ Skipped ${e.source}: ${e.error}`),
           `🎉 Successfully generated ${bundleData.conceptCount} concepts in OKF v0.2 format!`
         ]);
         return;
@@ -117,14 +147,31 @@ export default function App() {
       console.warn('Backend crawl unavailable, attempting client-side in-browser generation:', err);
     }
 
-    // Client-side fallback for GitHub Pages (OpenAPI / direct spec parsing)
+    // Client-side fallback for GitHub Pages - same adapters, browser fetcher
     try {
-      setProgressLogs((prev) => [...prev, '⚡ Running in browser mode: Fetching and parsing specification...']);
-      const clientBundle = await generateBundleInBrowser(url, true);
+      setProgressLogs((prev) => [...prev, '⚡ Running in browser mode: ingesting sources locally...']);
+      const uploads = await filesToSourceInputs(files);
+      const clientBundle = await generateBundleInBrowser([...urlList, ...uploads], {
+        maxPages,
+        maxDepth,
+        scope,
+        computations,
+        maxFiles,
+        githubToken,
+        onProgress: (data) => {
+          if (data.message) {
+            setProgressLogs((prev) => [...prev, data.message]);
+          }
+          if (data.type === 'page_crawled') {
+            setPagesCrawled(data.pagesCrawled);
+          }
+        }
+      });
       setBundle(clientBundle);
       setActiveFilePath('index.md');
       setProgressLogs((prev) => [
         ...prev,
+        ...(clientBundle.sourceErrors || []).map((e) => `⚠️ Skipped ${e.source}: ${e.error}`),
         `🎉 Successfully generated ${clientBundle.conceptCount} concepts in OKF v0.2 format (In-Browser)!`
       ]);
     } catch (clientErr) {

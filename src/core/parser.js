@@ -1,6 +1,59 @@
 import * as cheerio from 'cheerio';
 
 /**
+ * Sniffs a code language from an optional class attribute and the code text.
+ * Shared by the HTML parser and the markdown parser so detection stays in one place.
+ */
+export function detectCodeLanguage(codeText, classAttr = '') {
+  const langMatch = (classAttr || '').match(/(?:lang|language)-([a-zA-Z0-9_-]+)/);
+  if (langMatch) {
+    return langMatch[1].toLowerCase();
+  }
+  if (/SELECT|FROM|WHERE|JOIN|GROUP BY|INSERT|UPDATE|CREATE TABLE/i.test(codeText)) {
+    return 'sql';
+  }
+  if (/def |import |print\(|class /i.test(codeText)) {
+    return 'python';
+  }
+  if (/bq |gcloud |curl |npm |git /i.test(codeText)) {
+    return 'bash';
+  }
+  if (/\{[\s\S]*\}|\[[\s\S]*\]/.test(codeText) && codeText.startsWith('{')) {
+    return 'json';
+  }
+  if (/^[a-zA-Z0-9_-]+:\s+/m.test(codeText)) {
+    return 'yaml';
+  }
+  return 'text';
+}
+
+export const EXECUTABLE_LANGUAGES = ['sql', 'python', 'bash', 'sh'];
+
+/**
+ * Classifies an OKF concept `type` from a document title and its code blocks.
+ * Shared with the markdown parser.
+ */
+export function classifyConceptType(title, codeBlocks = []) {
+  const lowerTitle = (title || '').toLowerCase();
+  if (lowerTitle.includes('introduction') || lowerTitle.includes('overview') || lowerTitle.includes('concept')) {
+    return 'Overview';
+  }
+  if (lowerTitle.includes('reference') || lowerTitle.includes('syntax') || lowerTitle.includes('schema') || lowerTitle.includes('api')) {
+    return 'Reference';
+  }
+  if (lowerTitle.includes('how to') || lowerTitle.includes('step') || lowerTitle.includes('playbook') || lowerTitle.includes('triage') || lowerTitle.includes('incident')) {
+    return 'Playbook';
+  }
+  if (lowerTitle.includes('table') || lowerTitle.includes('dataset')) {
+    return 'BigQuery Table';
+  }
+  if (codeBlocks.some(c => c.isExecutable && c.language === 'sql')) {
+    return 'Guide';
+  }
+  return 'Guide';
+}
+
+/**
  * Clean and extract content from an HTML documentation page.
  */
 export function parseDocumentationHtml(html, url = '') {
@@ -151,29 +204,14 @@ export function parseDocumentationHtml(html, url = '') {
     const codeElem = $(elem).is('pre') ? $(elem) : $(elem).find('pre, code');
     const codeText = codeElem.text().trim();
     const classAttr = codeElem.attr('class') || $(elem).attr('class') || '';
-    let language = 'text';
-
-    const langMatch = classAttr.match(/(?:lang|language)-([a-zA-Z0-9_-]+)/);
-    if (langMatch) {
-      language = langMatch[1].toLowerCase();
-    } else if (/SELECT|FROM|WHERE|JOIN|GROUP BY|INSERT|UPDATE|CREATE TABLE/i.test(codeText)) {
-      language = 'sql';
-    } else if (/def |import |print\(|class /i.test(codeText)) {
-      language = 'python';
-    } else if (/bq |gcloud |curl |npm |git /i.test(codeText)) {
-      language = 'bash';
-    } else if (/\{[\s\S]*\}|\[[\s\S]*\]/.test(codeText) && codeText.startsWith('{')) {
-      language = 'json';
-    } else if (/^[a-zA-Z0-9_-]+:\s+/m.test(codeText)) {
-      language = 'yaml';
-    }
+    const language = detectCodeLanguage(codeText, classAttr);
 
     if (codeText.length > 10) {
       codeBlocks.push({
         id: `snippet-${i + 1}`,
         language,
         code: codeText,
-        isExecutable: ['sql', 'python', 'bash', 'sh'].includes(language)
+        isExecutable: EXECUTABLE_LANGUAGES.includes(language)
       });
     }
   });
@@ -189,19 +227,7 @@ export function parseDocumentationHtml(html, url = '') {
   });
 
   // 10. Classify Concept Type
-  let type = 'Guide';
-  const lowerTitle = title.toLowerCase();
-  if (lowerTitle.includes('introduction') || lowerTitle.includes('overview') || lowerTitle.includes('concept')) {
-    type = 'Overview';
-  } else if (lowerTitle.includes('reference') || lowerTitle.includes('syntax') || lowerTitle.includes('schema') || lowerTitle.includes('api')) {
-    type = 'Reference';
-  } else if (lowerTitle.includes('how to') || lowerTitle.includes('step') || lowerTitle.includes('playbook') || lowerTitle.includes('triage') || lowerTitle.includes('incident')) {
-    type = 'Playbook';
-  } else if (lowerTitle.includes('table') || lowerTitle.includes('dataset')) {
-    type = 'BigQuery Table';
-  } else if (codeBlocks.some(c => c.isExecutable && c.language === 'sql')) {
-    type = 'Guide';
-  }
+  const type = classifyConceptType(title, codeBlocks);
 
   return {
     url,
