@@ -19,6 +19,92 @@ export function resolveRef(spec, ref) {
 }
 
 /**
+ * Slugifies an endpoint path, keeping the separators that make it readable.
+ * Without this, /conversations/{conversation_id}/messages/{message_id} collapses
+ * into one run-on word.
+ */
+export function slugifyPath(pathKey) {
+  return slugify(String(pathKey || '').replace(/[{}]/g, ' ').replace(/[/_.]+/g, '-'));
+}
+
+/**
+ * Filename stem for an endpoint concept.
+ *
+ * A spec-supplied operationId ("create_query_task") is far more readable than a
+ * slugified path, so it wins when present; otherwise the path is used.
+ */
+export function endpointSlug(ep) {
+  if (ep.hasExplicitOperationId && ep.operationId) return slugify(ep.operationId);
+  return slugify(`${ep.method}-${slugifyPath(ep.path)}`);
+}
+
+/**
+ * Bundle-relative link to a schema concept.
+ */
+export function schemaLink(schemaName) {
+  return `/schemas/${slugify(schemaName)}.md`;
+}
+
+/**
+ * Renders a schema reference as a readable, linked type.
+ *
+ * Complex specs describe most of their payloads by reference - a body parameter
+ * is a $ref, a response is a $ref, and a property is often an array of $ref.
+ * Rendering those as a bare "object" or "array" throws away the most useful
+ * thing the spec knows.
+ */
+export function describeSchemaType(schema, options = {}) {
+  const { linkSchemas = true, depth = 0 } = options;
+  if (!schema || typeof schema !== 'object') return '`object`';
+
+  if (schema.$ref) {
+    const name = schema.$ref.split('/').pop();
+    return linkSchemas ? `[${name}](${schemaLink(name)})` : `\`${name}\``;
+  }
+
+  // allOf is composition; describe it as the sum of its parts.
+  const composed = schema.allOf || schema.oneOf || schema.anyOf;
+  if (Array.isArray(composed) && composed.length > 0 && depth < 3) {
+    const joiner = schema.allOf ? ' & ' : ' \\| ';
+    return composed.map(part => describeSchemaType(part, { linkSchemas, depth: depth + 1 })).join(joiner);
+  }
+
+  if (schema.type === 'array') {
+    const items = schema.items
+      ? describeSchemaType(schema.items, { linkSchemas, depth: depth + 1 })
+      : '`any`';
+    return `array of ${items}`;
+  }
+
+  if (schema.type) {
+    const base = schema.format ? `${schema.type} (${schema.format})` : schema.type;
+    if (Array.isArray(schema.enum) && schema.enum.length > 0) {
+      const values = schema.enum.slice(0, 6).map(v => `\`${v}\``).join(', ');
+      const more = schema.enum.length > 6 ? ', …' : '';
+      return `\`${base}\` - one of ${values}${more}`;
+    }
+    return `\`${base}\``;
+  }
+
+  if (schema.properties) return '`object`';
+  return '`object`';
+}
+
+/**
+ * Resolves the schema a parameter carries (Swagger 2 body params and OpenAPI 3
+ * requestBody-style params both end up here).
+ */
+export function parameterSchema(param) {
+  if (!param) return null;
+  if (param.schema) return param.schema;
+  if (param.content) {
+    const first = Object.values(param.content)[0];
+    if (first && first.schema) return first.schema;
+  }
+  return null;
+}
+
+/**
  * Parses an OpenAPI (v2 or v3) / Swagger specification into structured sections and endpoints.
  */
 export function parseOpenApiSpec(spec, sourceUrl) {
@@ -63,7 +149,8 @@ export function parseOpenApiSpec(spec, sourceUrl) {
       const summary = operation.summary || operation.description?.split('\n')[0] || `${method.toUpperCase()} ${pathKey}`;
       const opDescription = operation.description || operation.summary || '';
       const tags = (operation.tags && operation.tags.length > 0) ? operation.tags : ['General'];
-      const operationId = operation.operationId || `${method}-${slugify(pathKey)}`;
+      const hasExplicitOperationId = Boolean(operation.operationId);
+      const operationId = operation.operationId || `${method}-${slugifyPath(pathKey)}`;
 
       // Resolve Parameters
       const rawParams = [...(pathItem.parameters || []), ...(operation.parameters || [])];
@@ -96,6 +183,7 @@ export function parseOpenApiSpec(spec, sourceUrl) {
         description: opDescription,
         tags,
         operationId,
+        hasExplicitOperationId,
         parameters,
         responses,
         consumes: operation.consumes || spec.consumes || ['application/json'],
@@ -159,27 +247,51 @@ export function renderEndpointMarkdown(ep, parsedApi, sourceUrl, sourceId) {
     body += `* **Consumes**: \`${ep.consumes.join(', ')}\`\n`;
     body += `* **Produces**: \`${ep.produces.join(', ')}\`\n\n`;
 
+    // Request Body - for anything but a GET this is the important part, and in
+    // a real-world spec it is almost always a schema reference, not an inline type.
+    const bodyParams = ep.parameters.filter(p => p.in === 'body' || p.in === 'formData');
+    const otherParams = ep.parameters.filter(p => p.in !== 'body' && p.in !== 'formData');
+
+    if (bodyParams.length > 0) {
+      body += `## Request Body\n\n`;
+      bodyParams.forEach(p => {
+        const schema = parameterSchema(p);
+        const type = schema ? describeSchemaType(schema) : `\`${p.type || 'object'}\``;
+        const desc = (p.description || '').replace(/[\r\n]+/g, ' ').trim();
+        body += `* **${p.name}**${p.required ? ' (required)' : ''}: ${type}${desc ? ` - ${desc}` : ''}\n`;
+      });
+      body += `\n`;
+    }
+
     // Parameters Table
-    if (ep.parameters.length > 0) {
+    if (otherParams.length > 0) {
       body += `## Parameters\n\n`;
       body += `| Parameter | In | Type | Required | Description |\n`;
       body += `| --- | --- | --- | --- | --- |\n`;
-      ep.parameters.forEach(p => {
-        const type = p.type || p.schema?.type || 'string';
+      otherParams.forEach(p => {
+        const schema = parameterSchema(p);
+        const type = schema
+          ? describeSchemaType(schema)
+          : describeSchemaType({ type: p.type || 'string', format: p.format, enum: p.enum, items: p.items });
         const req = p.required ? '**Yes**' : 'No';
         const desc = (p.description || '').replace(/[\r\n]+/g, ' ').trim() || '-';
-        body += `| \`${p.name}\` | ${p.in} | \`${type}\` | ${req} | ${desc} |\n`;
+        body += `| \`${p.name}\` | ${p.in} | ${type} | ${req} | ${desc} |\n`;
       });
       body += `\n`;
     }
 
     // Responses Table
     if (ep.responses.length > 0) {
+      const anyTyped = ep.responses.some(r => r.schema);
       body += `## Responses\n\n`;
-      body += `| HTTP Status | Description |\n`;
-      body += `| --- | --- |\n`;
+      body += anyTyped
+        ? `| HTTP Status | Returns | Description |\n| --- | --- | --- |\n`
+        : `| HTTP Status | Description |\n| --- | --- |\n`;
       ep.responses.forEach(r => {
-        body += `| \`${r.code}\` | ${r.description} |\n`;
+        const desc = (r.description || '').replace(/[\r\n]+/g, ' ').trim() || '-';
+        body += anyTyped
+          ? `| \`${r.code}\` | ${r.schema ? describeSchemaType(r.schema) : '-'} | ${desc} |\n`
+          : `| \`${r.code}\` | ${desc} |\n`;
       });
       body += `\n`;
     }
@@ -207,17 +319,45 @@ export function renderSchemaMarkdown(schemaName, schemaObj, parsedApi, sourceUrl
       body += `${schemaObj.description}\n\n`;
     }
 
+    // A model composed with allOf inherits its parts; name them before the table.
+    const composed = schemaObj.allOf || schemaObj.oneOf || schemaObj.anyOf;
+    if (Array.isArray(composed) && composed.length > 0) {
+      const label = schemaObj.allOf ? 'Composed of' : 'One of';
+      body += `**${label}**: ${composed.map(part => describeSchemaType(part)).join(schemaObj.allOf ? ', ' : ' or ')}\n\n`;
+    }
+
+    // Properties may sit directly on the model or inside a composition branch.
+    // A branch is often a $ref to a base model, so it is resolved one level
+    // deep - otherwise inherited properties simply vanish from the concept.
+    const branches = (Array.isArray(composed) ? composed : []).map(part => {
+      if (part && part.$ref) return resolveRef(parsedApi.rawSpec, part.$ref) || part;
+      return part || {};
+    });
+
+    const properties = {
+      ...Object.assign({}, ...branches.map(part => part.properties || {})),
+      ...(schemaObj.properties || {})
+    };
+    const required = new Set([
+      ...(schemaObj.required || []),
+      ...branches.flatMap(part => part.required || [])
+    ]);
+
     body += `## Schema Properties\n\n`;
-    if (schemaObj.properties && typeof schemaObj.properties === 'object') {
-      body += `| Property | Type | Format | Description |\n`;
+    if (Object.keys(properties).length > 0) {
+      body += `| Property | Type | Required | Description |\n`;
       body += `| --- | --- | --- | --- |\n`;
-      for (const [propName, propObj] of Object.entries(schemaObj.properties)) {
-        const type = propObj.type || (propObj.$ref ? `[${propObj.$ref.split('/').pop()}](./${slugify(propObj.$ref.split('/').pop())}.md)` : 'object');
-        const format = propObj.format || '-';
+      for (const [propName, propObj] of Object.entries(properties)) {
+        // describeSchemaType preserves $ref links and array element types,
+        // which a bare `type` lookup discards.
+        const type = describeSchemaType(propObj);
+        const req = required.has(propName) ? '**Yes**' : (propObj.readOnly ? 'read-only' : 'No');
         const desc = (propObj.description || '').replace(/[\r\n]+/g, ' ').trim() || '-';
-        body += `| \`${propName}\` | ${type} | \`${format}\` | ${desc} |\n`;
+        body += `| \`${propName}\` | ${type} | ${req} | ${desc} |\n`;
       }
       body += `\n`;
+    } else if (schemaObj.type === 'array' || schemaObj.$ref) {
+      body += `This model is ${describeSchemaType(schemaObj)}.\n\n`;
     } else {
       body += `\`\`\`json\n${JSON.stringify(schemaObj, null, 2)}\n\`\`\`\n\n`;
     }
@@ -259,7 +399,7 @@ export function buildOKFBundleFromOpenApi(parsedApi, sourceUrl, options = {}) {
     }
 
     endpoints.forEach(ep => {
-      const slug = slugify(`${ep.method}-${ep.path}`);
+      const slug = endpointSlug(ep);
       const filename = `${slug}.md`;
       const relativePath = `${folder}/${filename}`;
       const bundleRelativePath = `/${relativePath}`;
@@ -435,6 +575,8 @@ export function openApiToDocuments(parsedApi, sourceUrl, options = {}) {
         sourceType: 'openapi',
         url: parsedApi.baseUrl ? `${parsedApi.baseUrl}${ep.path}` : sourceUrl,
         section: tagName,
+        splittable: false,
+        isRoot: false,
         markdown: stripRenderedChrome(renderEndpointMarkdown(ep, parsedApi, sourceUrl, footnoteId)),
         absolutizeLinks: false,
         title: `${ep.method} ${ep.path} - ${ep.summary}`,
@@ -444,7 +586,7 @@ export function openApiToDocuments(parsedApi, sourceUrl, options = {}) {
         author,
         lastModified,
         siteName: parsedApi.title,
-        slugHint: slugify(`${ep.method}-${ep.path}`)
+        slugHint: endpointSlug(ep)
       });
     });
   }
@@ -455,6 +597,8 @@ export function openApiToDocuments(parsedApi, sourceUrl, options = {}) {
       sourceType: 'openapi',
       url: sourceUrl,
       section: 'Schemas',
+      splittable: false,
+      isRoot: false,
       markdown: stripRenderedChrome(renderSchemaMarkdown(schemaName, schemaObj, parsedApi, sourceUrl, footnoteId)),
       absolutizeLinks: false,
       title: `${schemaName} Schema Model`,

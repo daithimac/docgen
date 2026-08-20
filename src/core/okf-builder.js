@@ -1,8 +1,10 @@
 import yaml from 'js-yaml';
 import { parseDocumentationHtml } from './parser.js';
-import { parseMarkdownDocument } from './markdown-parser.js';
+import { parseMarkdownDocument, extractMarkdownCodeBlocks, firstSentenceOf } from './markdown-parser.js';
 import { htmlToMarkdown } from './markdown-converter.js';
 import { SOURCE_TYPE_LABELS } from './sources/types.js';
+import { splitMarkdownIntoSections } from './section-splitter.js';
+import { classifyConceptType } from './parser.js';
 
 /**
  * Creates a URL-safe slug from a string.
@@ -20,10 +22,27 @@ export function slugify(text) {
 /**
  * Derives a clean subdirectory and concept filename from URL, section, and title.
  */
+export const MAX_SLUG_LENGTH = 60;
+
+// How many concepts of a section the root index lists before deferring to the
+// section's own index. Keeps the root readable on large API specifications.
+export const ROOT_INDEX_ENTRIES_PER_SECTION = 12;
+
+/**
+ * Keeps filenames readable when a concept title is a full sentence, trimming
+ * at a word boundary rather than mid-word.
+ */
+export function truncateSlug(slug, maxLength = MAX_SLUG_LENGTH) {
+  if (!slug || slug.length <= maxLength) return slug;
+  const clipped = slug.slice(0, maxLength);
+  const lastDash = clipped.lastIndexOf('-');
+  return (lastDash > maxLength / 2 ? clipped.slice(0, lastDash) : clipped).replace(/-+$/, '');
+}
+
 export function getConceptPathInfo(pageData, isRoot = false, hints = {}) {
   const url = pageData.url || '';
   let section = pageData.section || 'general';
-  let slug = hints.slugHint ? slugify(hints.slugHint) : '';
+  let slug = hints.slugHint ? truncateSlug(slugify(hints.slugHint)) : '';
 
   // Synthetic URLs (upload://, text://) carry no meaningful path.
   if (!slug && /^https?:\/\//i.test(url)) {
@@ -37,7 +56,7 @@ export function getConceptPathInfo(pageData, isRoot = false, hints = {}) {
   }
 
   if (!slug) {
-    slug = slugify(pageData.title);
+    slug = truncateSlug(slugify(pageData.title));
   }
 
   // Determine category folder
@@ -127,6 +146,31 @@ export class OKFBundleBuilder {
     this.bundleTitle = options.bundleTitle || 'Documentation Knowledge Bundle';
     this.timestamp = options.timestamp || new Date().toISOString();
     this.dateString = this.timestamp.split('T')[0];
+    // Documents that read as a catalogue of sibling concepts are broken into
+    // one concept per section. Disable for one-file-per-document behaviour.
+    this.splitSections = options.splitSections !== false;
+    this.splitOptions = options.splitOptions || {};
+  }
+
+  /**
+   * Derives a concept from one section of a larger document, inheriting the
+   * parent's provenance but carrying its own title, body and code blocks.
+   */
+  deriveSectionConcept(parent, section) {
+    const codeBlocks = extractMarkdownCodeBlocks(section.body);
+    const description = firstSentenceOf(section.body) || `${section.title} - ${parent.title}.`;
+
+    return {
+      ...parent,
+      url: `${parent.url}#${slugify(section.title)}`,
+      title: section.title,
+      description,
+      type: classifyConceptType(section.title, codeBlocks),
+      headings: [],
+      codeBlocks,
+      htmlBody: '',
+      markdownBody: section.body
+    };
   }
 
   /**
@@ -175,7 +219,8 @@ export class OKFBundleBuilder {
           author: doc.author,
           siteName: doc.siteName,
           lastModified: doc.lastModified,
-          absolutizeLinks: doc.absolutizeLinks
+          absolutizeLinks: doc.absolutizeLinks,
+          linkRoot: doc.linkRoot
         })
       : parseDocumentationHtml(doc.html || '', doc.url);
 
@@ -189,6 +234,11 @@ export class OKFBundleBuilder {
     if (doc.lastModified) parsed.lastModified = doc.lastModified;
     if (doc.tags && doc.tags.length) {
       parsed.tags = Array.from(new Set([...(parsed.tags || []), ...doc.tags]));
+    }
+
+    // Normalize to markdown here so section splitting is format-agnostic.
+    if (typeof parsed.markdownBody !== 'string') {
+      parsed.markdownBody = htmlToMarkdown(parsed.htmlBody);
     }
 
     return parsed;
@@ -228,19 +278,62 @@ export class OKFBundleBuilder {
       };
     };
 
-    // Step 1: Parse all documents and assign collision-safe bundle paths
-    let rootClaimed = false;
+    // Step 1a: Parse each source document, then expand any that read as a
+    // catalogue of sibling concepts into one concept per section.
+    const documentMeta = [];   // one entry per input document, pre-split
+    const folderOverviews = new Map(); // folder -> prose for its index.md
+    const expanded = [];
+
     documents.forEach((doc, index) => {
       const parsed = this.parseDocument(doc);
-      const isRoot = !rootClaimed && (doc.isRoot === true || (doc.isRoot === undefined && index === 0));
+      const wantsRoot = doc.isRoot === true || (doc.isRoot === undefined && index === 0);
+      documentMeta.push(parsed);
+
+      // Documents an adapter already emitted as a single concept - an API
+      // endpoint, a schema model - carry their own section headings as
+      // internal structure, not as a catalogue of sibling concepts.
+      const split = this.splitSections && doc.splittable !== false
+        ? splitMarkdownIntoSections(parsed.markdownBody, this.splitOptions)
+        : null;
+
+      if (!split) {
+        expanded.push({ doc, parsed, wantsRoot });
+        return;
+      }
+
+      // The document itself becomes a section directory named after it; its
+      // preamble becomes that directory's overview prose.
+      const folder = slugify(doc.slugHint || parsed.title) || 'concepts';
+      folderOverviews.set(folder, {
+        title: parsed.title,
+        description: parsed.description,
+        preamble: split.preamble,
+        resource: parsed.url
+      });
+
+      split.sections.forEach(section => {
+        expanded.push({
+          doc: { ...doc, isRoot: false, slugHint: slugify(section.title) },
+          parsed: this.deriveSectionConcept(parsed, { ...section }),
+          wantsRoot: false,
+          forcedFolder: folder
+        });
+      });
+    });
+
+    // Step 1b: Assign collision-safe bundle paths
+    let rootClaimed = false;
+    expanded.forEach(({ doc, parsed, wantsRoot, forcedFolder }) => {
+      const isRoot = !rootClaimed && wantsRoot;
       if (isRoot) rootClaimed = true;
 
       const draft = getConceptPathInfo(parsed, isRoot, { slugHint: doc.slugHint });
-      const pathInfo = reservePath(draft.folder, draft.filename, doc.sourceId);
+      const targetFolder = forcedFolder !== undefined ? forcedFolder : draft.folder;
+      const pathInfo = reservePath(targetFolder, draft.filename, doc.sourceId);
 
-      if (doc.url) {
-        urlToPathMap.set(doc.url, pathInfo.bundleRelativePath);
-        urlToPathMap.set(doc.url.replace(/\/$/, ''), pathInfo.bundleRelativePath);
+      if (parsed.url) {
+        urlToPathMap.set(parsed.url, pathInfo.bundleRelativePath);
+        urlToPathMap.set(parsed.url.replace(/\/$/, ''), pathInfo.bundleRelativePath);
       }
 
       parsedPages.push({ raw: doc, parsed, pathInfo });
@@ -264,10 +357,8 @@ export class OKFBundleBuilder {
         parsed
       });
 
-      // 2a. Use pre-rendered markdown when the adapter supplied it, otherwise convert HTML
-      let bodyMarkdown = typeof parsed.markdownBody === 'string'
-        ? parsed.markdownBody
-        : htmlToMarkdown(parsed.htmlBody);
+      // 2a. Body markdown is normalized during parsing, whatever the source format
+      let bodyMarkdown = parsed.markdownBody;
 
       // 2b. Rewrite internal hyperlinks to bundle-relative OKF paths
       bodyMarkdown = this.rewriteLinks(bodyMarkdown, urlToPathMap, pathInfo);
@@ -340,8 +431,23 @@ export class OKFBundleBuilder {
     // Step 3: Generate Subdirectory index.md files
     folders.forEach(folder => {
       const concepts = folderConceptsMap.get(folder) || [];
-      let indexContent = `# ${this.formatFolderTitle(folder)}\n\n`;
-      indexContent += `This directory contains curated knowledge documents related to **${this.formatFolderTitle(folder)}**.\n\n`;
+      const overview = folderOverviews.get(folder);
+
+      // A directory produced by splitting one document keeps that document's
+      // own title and preamble, rather than a generated blurb.
+      let indexContent = `# ${overview?.title || this.formatFolderTitle(folder)}\n\n`;
+      if (overview) {
+        if (overview.preamble) {
+          indexContent += `${overview.preamble}\n\n`;
+        } else if (overview.description) {
+          indexContent += `${overview.description}\n\n`;
+        }
+        if (overview.resource) {
+          indexContent += `Source: [${overview.title}](${overview.resource})\n\n`;
+        }
+      } else {
+        indexContent += `This directory contains curated knowledge documents related to **${this.formatFolderTitle(folder)}**.\n\n`;
+      }
       indexContent += `## Concepts\n\n`;
 
       concepts.forEach(({ pathInfo, parsed }) => {
@@ -358,8 +464,18 @@ export class OKFBundleBuilder {
     });
 
     // Step 4: Generate Bundle Root index.md (with okf_version: "0.2")
-    const rootParsed = parsedPages.find(p => !p.pathInfo.folder)?.parsed || parsedPages[0]?.parsed;
-    const rootIndexContent = this.generateRootIndex(folderConceptsMap, folders, computations, rootParsed, sources);
+    // Bundle headline. A root concept wins; otherwise a source that names itself
+    // (an API spec knows its title, a bare URL does not) beats falling back to
+    // whichever concept happened to be emitted first.
+    const namedSource = sources.length === 1 && sources[0].title && sources[0].title !== sources[0].url
+      ? sources[0]
+      : null;
+    const rootParsed = parsedPages.find(p => !p.pathInfo.folder)?.parsed
+      || (namedSource ? { title: namedSource.title, description: namedSource.description, siteName: namedSource.title } : null)
+      || documentMeta[0]
+      || parsedPages[0]?.parsed;
+    const folderTitles = new Map(Array.from(folderOverviews.entries()).map(([f, o]) => [f, o.title]));
+    const rootIndexContent = this.generateRootIndex(folderConceptsMap, folders, computations, rootParsed, sources, folderTitles);
     bundleFiles.set('index.md', rootIndexContent);
 
     // Step 5: Generate log.md
@@ -423,7 +539,7 @@ export class OKFBundleBuilder {
   /**
    * Generates Root index.md with okf_version frontmatter and progressive disclosure groups.
    */
-  generateRootIndex(folderConceptsMap, folders, computations, rootPageData, sources = []) {
+  generateRootIndex(folderConceptsMap, folders, computations, rootPageData, sources = [], folderTitles = null) {
     const frontmatter = `---\nokf_version: "0.2"\n---\n\n`;
     let content = frontmatter;
     content += `# ${rootPageData?.title || 'Open Knowledge Bundle'}\n\n`;
@@ -442,12 +558,20 @@ export class OKFBundleBuilder {
     // Folders
     folders.forEach(folder => {
       const concepts = folderConceptsMap.get(folder) || [];
-      content += `## ${this.formatFolderTitle(folder)}\n\n`;
-      content += `* [${this.formatFolderTitle(folder)} Directory](${folder}/index.md) - Section overview and index.\n`;
+      const folderTitle = folderTitles?.get(folder) || this.formatFolderTitle(folder);
+      content += `## ${folderTitle}\n\n`;
+      content += `* [${folderTitle} Directory](${folder}/index.md) - Section overview and index.\n`;
 
-      concepts.forEach(({ pathInfo, parsed }) => {
+      // Progressive disclosure: a large section is represented by its directory
+      // plus a sample, not by reproducing hundreds of entries in the root index.
+      const shown = concepts.slice(0, ROOT_INDEX_ENTRIES_PER_SECTION);
+      shown.forEach(({ pathInfo, parsed }) => {
         content += `* [${parsed.title}](${pathInfo.relativePath}) - ${parsed.description || parsed.title}\n`;
       });
+      const hidden = concepts.length - shown.length;
+      if (hidden > 0) {
+        content += `* …and ${hidden} more in [${folderTitle}](${folder}/index.md).\n`;
+      }
       content += `\n`;
     });
 

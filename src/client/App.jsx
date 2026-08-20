@@ -52,7 +52,7 @@ export default function App() {
     setActiveFilePath('index.md');
   };
 
-  const handleStartCrawl = async ({ url, files = [], maxPages, maxDepth, scope, computations, maxFiles, githubToken }) => {
+  const handleStartCrawl = async ({ url, files = [], maxPages, maxDepth, scope, computations, maxFiles, githubToken, splitSections = true }) => {
     const urlList = (url || '')
       .split(/[\n,]+/)
       .map((s) => s.trim())
@@ -110,6 +110,7 @@ export default function App() {
       computations,
       maxFiles,
       githubToken,
+      splitSections,
       sessionId
     };
 
@@ -158,6 +159,7 @@ export default function App() {
         computations,
         maxFiles,
         githubToken,
+        splitSections,
         onProgress: (data) => {
           if (data.message) {
             setProgressLogs((prev) => [...prev, data.message]);

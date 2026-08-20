@@ -33,7 +33,12 @@ export async function generateBundle(inputs, options = {}) {
   const builder = new OKFBundleBuilder({
     includeAttestedComputations: options.computations !== false,
     bundleTitle: options.bundleTitle || 'Documentation Knowledge Bundle',
-    timestamp: options.timestamp
+    timestamp: options.timestamp,
+    splitSections: options.splitSections !== false,
+    splitOptions: {
+      ...(options.minSections ? { minSections: parseInt(options.minSections, 10) } : {}),
+      ...(options.maxSections ? { maxSections: parseInt(options.maxSections, 10) } : {})
+    }
   });
 
   const bundle = builder.buildBundle({

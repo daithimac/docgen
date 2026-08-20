@@ -33,6 +33,24 @@ export function toRawUrl(url) {
 }
 
 /**
+ * Determines what a root-relative link ("/docs/x.md") inside this document
+ * should resolve against. For files hosted out of a repository that is the
+ * repository root, not the host origin.
+ */
+export function repoLinkRoot(url) {
+  const ghRaw = url.match(/^(https?:\/\/raw\.githubusercontent\.com\/[^/]+\/[^/]+\/[^/]+)\//i);
+  if (ghRaw) return `${ghRaw[1]}/`;
+
+  const ghBlob = url.match(/^(https?:\/\/github\.com\/[^/]+\/[^/]+\/(?:blob|raw)\/[^/]+)\//i);
+  if (ghBlob) return `${ghBlob[1]}/`;
+
+  const gl = url.match(/^(https?:\/\/[^/]*gitlab[^/]*\/.+?\/-\/(?:blob|raw)\/[^/]+)\//i);
+  if (gl) return `${gl[1]}/`;
+
+  return '';
+}
+
+/**
  * Ingests a standalone markdown page (by URL) or raw markdown text.
  */
 export async function ingest(input, ctx = {}) {
@@ -66,6 +84,7 @@ export async function ingest(input, ctx = {}) {
       url,
       markdown,
       section: input.section || (isUrl ? sectionFromUrl(url) : 'Guides'),
+      linkRoot: isUrl ? repoLinkRoot(url) : '',
       isRoot: /readme\.mdx?$/i.test(url)
     }],
     meta: { sourceId, sourceType: SOURCE_TYPES.MARKDOWN, url, title: url }

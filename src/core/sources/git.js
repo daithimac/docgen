@@ -310,6 +310,7 @@ export async function ingest(input, ctx = {}) {
 
       processed++;
       const fileUrl = `${repo.webUrl}/blob/${listing.ref}/${filePath}`;
+      const linkRoot = `${repo.webUrl}/blob/${listing.ref}/`;
 
       if (SPEC_RE.test(filePath)) {
         const spec = parseSpecText(content);
@@ -334,6 +335,7 @@ export async function ingest(input, ctx = {}) {
         sourceType: SOURCE_TYPES.GIT,
         url: fileUrl,
         markdown: content,
+        linkRoot,
         section: sectionForRepoPath(filePath),
         isRoot: /^readme\.mdx?$/i.test(filePath),
         author: repo.owner,

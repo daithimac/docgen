@@ -54,15 +54,20 @@ export function extractMarkdownCodeBlocks(body) {
 }
 
 /**
- * Extracts ATX headings, ignoring anything inside fenced code blocks.
+ * Scans ATX headings, ignoring anything inside fenced code blocks, and reports
+ * the line each one sits on so callers can slice the document by section.
+ *
+ * CommonMark permits up to three spaces of indentation before the '#', which
+ * real-world documents do use - headings must not be missed because of it.
  */
-export function extractMarkdownHeadings(body) {
+export function scanHeadings(body) {
+  const lines = (body || '').split(/\r?\n/);
   const headings = [];
   let inFence = false;
   let fenceMarker = '';
 
-  for (const line of (body || '').split(/\r?\n/)) {
-    const fence = line.match(/^\s*(`{3,}|~{3,})/);
+  lines.forEach((line, lineIndex) => {
+    const fence = line.match(/^ {0,3}(`{3,}|~{3,})/);
     if (fence) {
       if (!inFence) {
         inFence = true;
@@ -70,18 +75,25 @@ export function extractMarkdownHeadings(body) {
       } else if (fence[1][0] === fenceMarker) {
         inFence = false;
       }
-      continue;
+      return;
     }
-    if (inFence) continue;
+    if (inFence) return;
 
-    const h = line.match(/^(#{1,4})\s+(.*?)\s*#*\s*$/);
+    const h = line.match(/^ {0,3}(#{1,6})\s+(.*?)\s*#*\s*$/);
     if (h) {
       const text = stripInlineMarkdown(h[2]);
-      if (text) headings.push({ level: h[1].length, text });
+      if (text) headings.push({ level: h[1].length, text, lineIndex, raw: line });
     }
-  }
+  });
 
   return headings;
+}
+
+/**
+ * Extracts ATX headings, ignoring anything inside fenced code blocks.
+ */
+export function extractMarkdownHeadings(body) {
+  return scanHeadings(body).map(({ level, text }) => ({ level, text }));
 }
 
 /**
@@ -151,11 +163,17 @@ function titleFromPath(url) {
  * Rewrites relative markdown links/images to absolute URLs against a base.
  * Keeps the bundle builder's existing URL-to-bundle-path rewriting able to match.
  */
-export function absolutizeMarkdownLinks(body, baseUrl) {
+export function absolutizeMarkdownLinks(body, baseUrl, linkRoot = '') {
   if (!baseUrl || !baseUrl.includes('://')) return body;
   return (body || '').replace(/(!?\[[^\]]*\]\()([^)\s]+)(\s*(?:"[^"]*")?\))/g, (m, head, href, tail) => {
     if (/^(https?:|mailto:|#|data:|upload:|git:)/i.test(href)) return m;
     try {
+      // A root-relative path inside a repository file means "repository root",
+      // not "host root" - resolving it against the origin would drop the
+      // owner/repo/ref prefix and produce a dead link.
+      if (href.startsWith('/') && linkRoot) {
+        return `${head}${new URL(href.replace(/^\/+/, ''), linkRoot).href}${tail}`;
+      }
       return `${head}${new URL(href, baseUrl).href}${tail}`;
     } catch (e) {
       return m;
@@ -164,12 +182,23 @@ export function absolutizeMarkdownLinks(body, baseUrl) {
 }
 
 /**
+ * First prose sentence of a markdown fragment, for use as a concept description.
+ */
+export function firstSentenceOf(markdown, maxLength = 300) {
+  const paragraph = firstParagraph(markdown);
+  if (!paragraph) return '';
+  const match = paragraph.match(/^.*?[.!?](?=\s|$)/);
+  const sentence = (match ? match[0] : paragraph).trim();
+  return sentence.length > maxLength ? `${sentence.slice(0, maxLength - 1).trimEnd()}\u2026` : sentence;
+}
+
+/**
  * Markdown counterpart to parseDocumentationHtml. Returns the same concept shape
  * so everything downstream of the source adapters is format-agnostic.
  */
 export function parseMarkdownDocument(markdown, url = '', hints = {}) {
   const { frontmatter, body: rawBody } = splitFrontmatter(markdown);
-  const body = hints.absolutizeLinks === false ? rawBody : absolutizeMarkdownLinks(rawBody, url);
+  const body = hints.absolutizeLinks === false ? rawBody : absolutizeMarkdownLinks(rawBody, url, hints.linkRoot);
 
   const headings = extractMarkdownHeadings(body);
   const codeBlocks = extractMarkdownCodeBlocks(body);
@@ -205,8 +234,8 @@ export function parseMarkdownDocument(markdown, url = '', hints = {}) {
 
   // Drop a leading H1 that duplicates the title - the builder emits its own.
   let markdownBody = body.trim();
-  const leadingH1 = markdownBody.match(/^#\s+(.*?)\s*$/m);
-  if (leadingH1 && markdownBody.startsWith('#') && stripInlineMarkdown(leadingH1[1]) === title.trim()) {
+  const leadingH1 = markdownBody.match(/^ {0,3}#\s+(.*?)\s*$/m);
+  if (leadingH1 && markdownBody.indexOf(leadingH1[0]) === 0 && stripInlineMarkdown(leadingH1[1]) === title.trim()) {
     markdownBody = markdownBody.slice(leadingH1[0].length).trim();
   }
 

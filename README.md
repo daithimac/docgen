@@ -12,11 +12,49 @@ Sources are detected automatically - paste any mix of them, comma or newline sep
 | --- | --- | --- |
 | **Documentation sites** | `https://docs.cloud.google.com/bigquery/docs/...` | Section-aware crawl with configurable depth, page limit and scope |
 | **Generic web pages** | any HTTP(S) page | Set *Max Pages* to 1 to ingest a single article without traversal |
-| **OpenAPI / Swagger** | `.../swagger.json`, `.../openapi.yaml`, a SwaggerUI or Redoc page | v2 and v3, JSON or YAML; endpoints and schemas become concepts |
+| **OpenAPI / Swagger** | `.../swagger.json`, `.../openapi.yaml`, a SwaggerUI or Redoc page | v2 and v3, JSON or YAML; endpoints and schemas become concepts (see [Large API specifications](#large-api-specifications)) |
 | **Git repositories** | `https://github.com/owner/repo`, `https://gitlab.com/group/project`, `git@host:owner/repo.git`, `https://host/owner/repo.git` | Reads `README`, `*.md`/`*.mdx` and any detected API spec files. GitHub/GitLab use their REST API; other hosts use a shallow `git clone` |
 | **Markdown pages** | `https://raw.githubusercontent.com/.../README.md`, GitHub `/blob/` URLs | Frontmatter, headings and fenced code are all preserved |
 | **Uploaded documents** | `.docx`, `.md`, `.mdx`, `.txt`, `.pdf` | Drag and drop in the UI, `--source ./path/to/file.docx` on the CLI, or `POST /api/upload` |
 | **Google Docs** | `https://docs.google.com/document/d/<id>/edit` | Requires link sharing set to "Anyone with the link" - the doc is exported as `.docx`. No OAuth involved |
+
+### Large API specifications
+
+A production API specification is mostly cross-references, and DocGen resolves them rather than flattening them away:
+
+* **Endpoints are named after their `operationId`** (`create-query-task.md`), falling back to a properly separated path slug. Path parameters no longer collapse into a run-on word.
+* **Request bodies get their own section**, linked to the schema concept they reference, instead of appearing as an untyped `body` row.
+* **Responses carry their return type**, linked - `200 | [Query](/schemas/query.md) | Query`.
+* **Schema properties keep their types**: `$ref` becomes a link, `array of $ref` keeps its element link, formats and enum values are shown, and required/read-only are marked.
+* **Composed models** (`allOf`, `oneOf`, `anyOf`) name their parts and surface inherited properties by resolving referenced branches.
+* **The root index stays readable**: each section links to its own directory index and lists a sample, deferring the rest ("…and 28 more"). Section indexes still list everything.
+
+As a reference point, the Looker API 4.0 specification (1 MB, 479 operations, 338 models) produces **855 files across 36 directories in under a second**, with 2,679 internal cross-links and zero broken links, at 100% OKF v0.2 conformance.
+
+> **Browser note**: some API hosts reject cross-origin requests outright (the Looker host above 404s any request carrying an `Origin` header). Those specs cannot be fetched by the static GitHub Pages build - use the server or the CLI. DocGen says so explicitly rather than reporting a bare fetch failure.
+
+### Section splitting
+
+A single document often holds many independent concepts - a metrics reference where every `##` heading is a separate metric, for example. DocGen detects this and emits one OKF concept per section, in a directory named after the document:
+
+```text
+performance-metrics/
+├── index.md                                # document title + preamble (intro prose, screenshots)
+├── indicative-looker-overhead.md
+├── average-async-runtime.md
+├── main-query-execution-time.md
+└── ...                                     # one concept per metric
+```
+
+Each concept keeps its own title, description and a `resource` that deep-links to the section anchor in the original document.
+
+Splitting only happens when a document genuinely reads as a catalogue: **3 or more sibling sections, each carrying real prose**. Guard rails keep it from firing where it shouldn't:
+
+* Length is measured as **prose**, not raw markdown - a section holding only an image or a code block is folded back into its neighbour rather than becoming a stub concept.
+* Headings used as prose (a common pattern in hand-written docs) fold into the preamble, so no text is lost.
+* Documents with more than 50 qualifying sections - a long `CHANGELOG.md`, for instance - are left whole rather than exploding into hundreds of files.
+
+Tune or disable it with `--no-split`, `--min-sections`, `--max-sections`, or the **Split multi-section documents** toggle in the UI.
 
 ### Runtime parity and its one limitation
 
@@ -32,6 +70,7 @@ Public GitHub/GitLab API access is rate limited. Supply a token via the **GitHub
 
 1. **Pluggable Source Adapters**:
    - Each source type is a self-contained adapter in `src/core/sources/` producing one normalized document shape; the bundle builder is entirely source-agnostic.
+   - Catalogue-style documents are split into one concept per section (see [Section splitting](#section-splitting)).
    - Heterogeneous sources merge into shared topic directories, with collision-safe filenames (a second `guides/install.md` becomes `guides/install-<source>.md`).
    - The root `index.md` and `log.md` record every contributing source and its type.
 
@@ -111,6 +150,9 @@ node bin/docgen.js \
 | `-f, --max-files <n>` | Maximum documentation files to read per repository | `100` |
 | `--scope <scope>` | Crawl boundary (`subtree` or `domain`) | `subtree` |
 | `--github-token <token>` | Token used to raise GitHub/GitLab API rate limits | `$GITHUB_TOKEN` |
+| `--no-split` | Keep each source document as a single concept | `false` |
+| `--min-sections <n>` | Sections a document needs before it is split | `3` |
+| `--max-sections <n>` | Above this many sections a document is left whole | `50` |
 | `--no-computations` | Disable Attested Computation extraction | `false` |
 
 ---
@@ -119,7 +161,7 @@ node bin/docgen.js \
 
 | Endpoint | Purpose |
 | --- | --- |
-| `POST /api/generate` | Canonical multi-source generation. Body: `{ sources, maxPages, maxDepth, scope, maxFiles, githubToken, computations, sessionId }` |
+| `POST /api/generate` | Canonical multi-source generation. Body: `{ sources, maxPages, maxDepth, scope, maxFiles, githubToken, computations, splitSections, minSections, maxSections, sessionId }` |
 | `POST /api/upload` | Same as above, as `multipart/form-data` with `files` attached (25 MB per file) |
 | `POST /api/describe-sources` | Classifies inputs without fetching - drives the UI's source-type chips |
 | `POST /api/crawl` | Legacy alias for `/api/generate` |

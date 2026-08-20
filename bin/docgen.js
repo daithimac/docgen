@@ -51,6 +51,9 @@ program
   .option('-f, --max-files <number>', 'Maximum documentation files to read per repository', '100')
   .option('--scope <scope>', 'Crawl scope: subtree | domain', 'subtree')
   .option('--github-token <token>', 'GitHub / GitLab token used to raise API rate limits (defaults to $GITHUB_TOKEN)')
+  .option('--no-split', 'Keep each source document as a single concept instead of splitting catalogue-style documents by section')
+  .option('--min-sections <number>', 'Sections a document needs before it is split into separate concepts', '3')
+  .option('--max-sections <number>', 'Above this many sections a document is left whole', '50')
   .option('--no-computations', 'Disable extraction of Attested Computations')
   .action(async (options) => {
     const rawValues = [...(options.source || []), ...(options.url || [])];
@@ -73,7 +76,8 @@ program
     console.log(`Max Pages:     ${options.maxPages}`);
     console.log(`Max Depth:     ${options.maxDepth}`);
     console.log(`Max Files/Repo:${options.maxFiles}`);
-    console.log(`Scope:         ${options.scope}\n`);
+    console.log(`Scope:         ${options.scope}`);
+    console.log(`Section split: ${options.split ? `on (>= ${options.minSections} sections, <= ${options.maxSections})` : 'off'}\n`);
 
     try {
       console.log('🕷️  Ingesting sources...');
@@ -86,6 +90,9 @@ program
         scope: options.scope,
         githubToken: options.githubToken || process.env.GITHUB_TOKEN || '',
         computations: options.computations,
+        splitSections: options.split,
+        minSections: options.minSections,
+        maxSections: options.maxSections,
         onProgress: (p) => {
           if (p.type === 'source_start') {
             console.log(`\n   ▸ ${p.message}`);
