@@ -54,6 +54,7 @@ export default function CrawlerControl({
   const [scope, setScope] = useState('subtree');
   const [githubToken, setGithubToken] = useState('');
   const [extractComputations, setExtractComputations] = useState(true);
+  const [splitSections, setSplitSections] = useState(true);
   const [files, setFiles] = useState([]);
   const [isDragging, setIsDragging] = useState(false);
   const fileInputRef = useRef(null);
@@ -95,6 +96,7 @@ export default function CrawlerControl({
       maxFiles,
       scope,
       githubToken,
+      splitSections,
       computations: extractComputations
     });
   };
@@ -331,6 +333,21 @@ export default function CrawlerControl({
                 disabled={isCrawling}
               />
               <span>Extract Attested Computations (SQL/Code)</span>
+            </label>
+          </div>
+
+          <div className="option-item" style={{ justifyContent: 'center' }}>
+            <label
+              style={{ cursor: 'pointer', display: 'flex', alignItems: 'center', gap: '8px' }}
+              title="A document listing several sections becomes one concept per section, in a directory named after the document."
+            >
+              <input
+                type="checkbox"
+                checked={splitSections}
+                onChange={(e) => setSplitSections(e.target.checked)}
+                disabled={isCrawling}
+              />
+              <span>Split multi-section documents into separate concepts</span>
             </label>
           </div>
         </div>

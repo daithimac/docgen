@@ -121,7 +121,10 @@ async function runGeneration(req, res, files = []) {
       scope: body.scope || 'subtree',
       maxFiles: body.maxFiles ?? 100,
       githubToken: body.githubToken || process.env.GITHUB_TOKEN || '',
-      computations: body.computations !== false && body.computations !== 'false'
+      computations: body.computations !== false && body.computations !== 'false',
+      splitSections: body.splitSections !== false && body.splitSections !== 'false',
+      minSections: body.minSections,
+      maxSections: body.maxSections
     });
 
     res.json(payload);

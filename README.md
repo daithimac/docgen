@@ -18,6 +18,29 @@ Sources are detected automatically - paste any mix of them, comma or newline sep
 | **Uploaded documents** | `.docx`, `.md`, `.mdx`, `.txt`, `.pdf` | Drag and drop in the UI, `--source ./path/to/file.docx` on the CLI, or `POST /api/upload` |
 | **Google Docs** | `https://docs.google.com/document/d/<id>/edit` | Requires link sharing set to "Anyone with the link" - the doc is exported as `.docx`. No OAuth involved |
 
+### Section splitting
+
+A single document often holds many independent concepts - a metrics reference where every `##` heading is a separate metric, for example. DocGen detects this and emits one OKF concept per section, in a directory named after the document:
+
+```text
+performance-metrics/
+├── index.md                                # document title + preamble (intro prose, screenshots)
+├── indicative-looker-overhead.md
+├── average-async-runtime.md
+├── main-query-execution-time.md
+└── ...                                     # one concept per metric
+```
+
+Each concept keeps its own title, description and a `resource` that deep-links to the section anchor in the original document.
+
+Splitting only happens when a document genuinely reads as a catalogue: **3 or more sibling sections, each carrying real prose**. Guard rails keep it from firing where it shouldn't:
+
+* Length is measured as **prose**, not raw markdown - a section holding only an image or a code block is folded back into its neighbour rather than becoming a stub concept.
+* Headings used as prose (a common pattern in hand-written docs) fold into the preamble, so no text is lost.
+* Documents with more than 50 qualifying sections - a long `CHANGELOG.md`, for instance - are left whole rather than exploding into hundreds of files.
+
+Tune or disable it with `--no-split`, `--min-sections`, `--max-sections`, or the **Split multi-section documents** toggle in the UI.
+
 ### Runtime parity and its one limitation
 
 Every source type runs in all three entry points - the Node server, the CLI, and the standalone in-browser engine used by the GitHub Pages build. The browser uses a CORS-proxy fallback for cross-origin fetches.
@@ -32,6 +55,7 @@ Public GitHub/GitLab API access is rate limited. Supply a token via the **GitHub
 
 1. **Pluggable Source Adapters**:
    - Each source type is a self-contained adapter in `src/core/sources/` producing one normalized document shape; the bundle builder is entirely source-agnostic.
+   - Catalogue-style documents are split into one concept per section (see [Section splitting](#section-splitting)).
    - Heterogeneous sources merge into shared topic directories, with collision-safe filenames (a second `guides/install.md` becomes `guides/install-<source>.md`).
    - The root `index.md` and `log.md` record every contributing source and its type.
 
@@ -111,6 +135,9 @@ node bin/docgen.js \
 | `-f, --max-files <n>` | Maximum documentation files to read per repository | `100` |
 | `--scope <scope>` | Crawl boundary (`subtree` or `domain`) | `subtree` |
 | `--github-token <token>` | Token used to raise GitHub/GitLab API rate limits | `$GITHUB_TOKEN` |
+| `--no-split` | Keep each source document as a single concept | `false` |
+| `--min-sections <n>` | Sections a document needs before it is split | `3` |
+| `--max-sections <n>` | Above this many sections a document is left whole | `50` |
 | `--no-computations` | Disable Attested Computation extraction | `false` |
 
 ---
@@ -119,7 +146,7 @@ node bin/docgen.js \
 
 | Endpoint | Purpose |
 | --- | --- |
-| `POST /api/generate` | Canonical multi-source generation. Body: `{ sources, maxPages, maxDepth, scope, maxFiles, githubToken, computations, sessionId }` |
+| `POST /api/generate` | Canonical multi-source generation. Body: `{ sources, maxPages, maxDepth, scope, maxFiles, githubToken, computations, splitSections, minSections, maxSections, sessionId }` |
 | `POST /api/upload` | Same as above, as `multipart/form-data` with `files` attached (25 MB per file) |
 | `POST /api/describe-sources` | Classifies inputs without fetching - drives the UI's source-type chips |
 | `POST /api/crawl` | Legacy alias for `/api/generate` |
